@@ -1,0 +1,6 @@
+{
+  "name": "SECTOR 09 // Tactical FPS",
+  "description": "High-performance 3D tactical first-person shooter set in an abandoned dusk industrial shipping compound with procedural PBR materials, ballistics, articulated enemy AI, and Web Audio synthesis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
