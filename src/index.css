@@ -1,1 +1,58 @@
 @import "tailwindcss";
+
+/* Tactical HUD overlay effects for title/deploy console */
+.tac-grid {
+  background-image:
+    linear-gradient(rgba(148, 163, 184, 0.055) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(148, 163, 184, 0.055) 1px, transparent 1px);
+  background-size: 44px 44px;
+}
+
+.tac-scanlines {
+  background-image: repeating-linear-gradient(
+    0deg,
+    rgba(255, 255, 255, 0.028) 0px,
+    rgba(255, 255, 255, 0.028) 1px,
+    transparent 1px,
+    transparent 4px
+  );
+}
+
+@keyframes tac-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.2;
+  }
+}
+.tac-blink {
+  animation: tac-blink 1.7s steps(2, jump-none) infinite;
+}
+
+@keyframes tac-sweep {
+  0% {
+    transform: translateY(-120%);
+  }
+  100% {
+    transform: translateY(1400%);
+  }
+}
+.tac-sweep {
+  animation: tac-sweep 9s linear infinite;
+}
+
+@keyframes tac-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.tac-fade-up {
+  animation: tac-fade-up 0.5s ease-out both;
+}

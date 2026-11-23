@@ -7,6 +7,13 @@ export class SoundEngine {
   private windGain: GainNode | null = null;
   private windStarted = false;
   private muted = false;
+  private engineNodes: {
+    osc: OscillatorNode;
+    osc2: OscillatorNode;
+    noise: AudioBufferSourceNode;
+    gain: GainNode;
+    filter: BiquadFilterNode;
+  } | null = null;
 
   unlock(): void {
     if (typeof window === 'undefined') return;
@@ -39,6 +46,78 @@ export class SoundEngine {
   setWindActive(active: boolean): void {
     if (!this.windGain || !this.ctx) return;
     this.windGain.gain.setTargetAtTime(active ? 0.08 : 0.025, this.ctx.currentTime, 0.35);
+  }
+
+  /** Continuous vehicle engine loop. rpm01 in [0,1]; active=false idles it out. */
+  setEngine(active: boolean, rpm01: number, kind: 'car' | 'bike' = 'car'): void {
+    if (!this.ctx || !this.masterGain || !this.noiseBuffer) {
+      this.engineNodes = null;
+      return;
+    }
+    if (!this.engineNodes) {
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sawtooth';
+      const osc2 = this.ctx.createOscillator();
+      osc2.type = 'square';
+      const noise = this.ctx.createBufferSource();
+      noise.buffer = this.noiseBuffer;
+      noise.loop = true;
+      const filter = this.ctx.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = 420;
+      filter.Q.value = 2.2;
+      const gain = this.ctx.createGain();
+      gain.gain.value = 0;
+      osc.connect(filter);
+      osc2.connect(filter);
+      noise.connect(filter);
+      filter.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start();
+      osc2.start();
+      noise.start();
+      this.engineNodes = { osc, osc2, noise, gain, filter };
+    }
+    const e = this.engineNodes;
+    const rpm = Math.max(0, Math.min(1, rpm01));
+    const base = kind === 'bike' ? 52 : 38;
+    e.osc.frequency.setTargetAtTime(base + rpm * (kind === 'bike' ? 240 : 170), this.ctx.currentTime, 0.06);
+    e.osc2.frequency.setTargetAtTime((base + rpm * 160) * 0.5, this.ctx.currentTime, 0.06);
+    e.filter.frequency.setTargetAtTime(320 + rpm * 900, this.ctx.currentTime, 0.08);
+    const target = active ? (kind === 'bike' ? 0.05 : 0.075) * (0.35 + rpm * 0.65) : 0;
+    e.gain.gain.setTargetAtTime(target, this.ctx.currentTime, active ? 0.08 : 0.25);
+  }
+
+  /** Single Geiger-counter click; call rate scales with radiation intensity. */
+  playGeiger(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(3400 + Math.random() * 900, now);
+    gain.gain.setValueAtTime(0.045, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.018);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.02);
+  }
+
+  playVehicleDoor(): void {
+    if (!this.ctx || !this.masterGain || this.muted) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(190, now);
+    osc.frequency.exponentialRampToValueAtTime(85, now + 0.09);
+    gain.gain.setValueAtTime(0.12, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.11);
+    osc.connect(gain);
+    gain.connect(this.masterGain);
+    osc.start(now);
+    osc.stop(now + 0.12);
   }
 
   private buildNoiseBuffer(seconds: number): AudioBuffer {
@@ -93,35 +172,37 @@ export class SoundEngine {
     const pitchJitter = 0.94 + Math.random() * 0.12;
     const distAtten = isEnemy ? Math.max(0.18, 1 - distance / 52) : 1;
 
-    const baseGain =
+    // Per-weapon report profiles: gain, body pitch, crack filter, tail length
+    const profile =
       weapon === 'shotgun'
-        ? 0.72
-        : weapon === 'marksman'
-          ? 0.64
-          : weapon === 'rifle'
-            ? 0.58
-            : 0.46;
+        ? { gain: 0.72, osc: 'sawtooth' as const, freq: 128, filter: 1150, tail: 0.36, drop: 28 }
+        : weapon === 'deagle'
+          ? { gain: 0.74, osc: 'sawtooth' as const, freq: 96, filter: 950, tail: 0.4, drop: 24 }
+          : weapon === 'lmg'
+            ? { gain: 0.68, osc: 'sawtooth' as const, freq: 132, filter: 1350, tail: 0.3, drop: 30 }
+            : weapon === 'marksman'
+              ? { gain: 0.64, osc: 'triangle' as const, freq: 148, filter: 2450, tail: 0.3, drop: 36 }
+              : weapon === 'smg'
+                ? { gain: 0.52, osc: 'square' as const, freq: 205, filter: 1900, tail: 0.14, drop: 40 }
+                : weapon === 'rifle'
+                  ? { gain: 0.58, osc: 'triangle' as const, freq: 175, filter: 1650, tail: 0.25, drop: 36 }
+                  : { gain: 0.46, osc: 'triangle' as const, freq: 225, filter: 2100, tail: 0.17, drop: 36 };
+
+    const baseGain = profile.gain;
     const level = (isEnemy ? 0.28 : baseGain) * distAtten;
 
     // 1. Punchy low-end bass thump
     const osc = this.ctx.createOscillator();
     const oscGain = this.ctx.createGain();
-    osc.type = weapon === 'shotgun' ? 'sawtooth' : 'triangle';
-    const startFreq =
-      (weapon === 'shotgun'
-        ? 128
-        : weapon === 'marksman'
-          ? 148
-          : weapon === 'rifle'
-            ? 175
-            : 225) * pitchJitter;
+    osc.type = profile.osc;
+    const startFreq = profile.freq * pitchJitter;
     osc.frequency.setValueAtTime(startFreq, now);
-    osc.frequency.exponentialRampToValueAtTime(weapon === 'shotgun' ? 28 : 36, now + 0.12);
+    osc.frequency.exponentialRampToValueAtTime(profile.drop, now + 0.12);
 
     oscGain.gain.setValueAtTime(level * 0.95, now);
     oscGain.gain.exponentialRampToValueAtTime(
       0.001,
-      now + (weapon === 'shotgun' ? 0.18 : 0.115),
+      now + (weapon === 'shotgun' || weapon === 'deagle' ? 0.18 : 0.115),
     );
     osc.connect(oscGain);
     oscGain.connect(this.masterGain);
@@ -133,29 +214,15 @@ export class SoundEngine {
     noise.buffer = this.noiseBuffer;
     const bp = this.ctx.createBiquadFilter();
     bp.type = isEnemy && distance > 18 ? 'lowpass' : 'bandpass';
-    const baseFilter =
-      weapon === 'shotgun'
-        ? 1150
-        : weapon === 'marksman'
-          ? 2450
-          : weapon === 'rifle'
-            ? 1650
-            : 2100;
+    const baseFilter = profile.filter;
     bp.frequency.setValueAtTime(
       (baseFilter * pitchJitter) / (1 + distance * 0.025),
       now,
     );
     bp.frequency.exponentialRampToValueAtTime(280, now + (weapon === 'shotgun' ? 0.34 : 0.24));
-    bp.Q.value = weapon === 'marksman' ? 1.15 : 0.75;
+    bp.Q.value = weapon === 'marksman' ? 1.15 : weapon === 'smg' ? 0.9 : 0.75;
 
-    const tailDur =
-      weapon === 'shotgun'
-        ? 0.36
-        : weapon === 'marksman'
-          ? 0.3
-          : weapon === 'rifle'
-            ? 0.25
-            : 0.17;
+    const tailDur = profile.tail;
     const nGain = this.ctx.createGain();
     nGain.gain.setValueAtTime(level * 0.9, now);
     nGain.gain.exponentialRampToValueAtTime(0.001, now + tailDur);
@@ -190,7 +257,10 @@ export class SoundEngine {
         const boltOsc = this.ctx.createOscillator();
         const boltGain = this.ctx.createGain();
         boltOsc.type = 'square';
-        boltOsc.frequency.setValueAtTime(weapon === 'rifle' ? 2400 : 2850, now + 0.015);
+        boltOsc.frequency.setValueAtTime(
+          weapon === 'smg' ? 3100 : weapon === 'lmg' ? 1900 : weapon === 'deagle' ? 1500 : weapon === 'rifle' ? 2400 : 2850,
+          now + 0.015,
+        );
         boltOsc.frequency.exponentialRampToValueAtTime(950, now + 0.045);
         boltGain.gain.setValueAtTime(0.06, now + 0.015);
         boltGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);

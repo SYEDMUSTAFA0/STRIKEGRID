@@ -63,7 +63,8 @@ export class Player {
   private reloadJustPressed = false;
   private meleeJustPressed = false;
   private grenadeJustPressed = false;
-  private switchWeaponRequest: 1 | 2 | 3 | 4 | 5 | null = null;
+  private interactJustPressed = false;
+  private switchWeaponRequest: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | null = null;
   private wheelDelta = 0;
   private isDraggingFallback = false;
   private lastPointerX = 0;
@@ -166,6 +167,7 @@ export class Player {
     this.reloadJustPressed = false;
     this.meleeJustPressed = false;
     this.grenadeJustPressed = false;
+    this.interactJustPressed = false;
     this.switchWeaponRequest = null;
     this.wheelDelta = 0;
     this.isDraggingFallback = false;
@@ -206,6 +208,8 @@ export class Player {
       this.meleeJustPressed = true;
     } else if (e.code === 'KeyG') {
       this.grenadeJustPressed = true;
+    } else if (e.code === 'KeyE' || e.code === 'KeyF') {
+      this.interactJustPressed = true;
     } else if (e.code === 'Digit1') {
       this.switchWeaponRequest = 1;
     } else if (e.code === 'Digit2') {
@@ -216,6 +220,12 @@ export class Player {
       this.switchWeaponRequest = 4;
     } else if (e.code === 'Digit5') {
       this.switchWeaponRequest = 5;
+    } else if (e.code === 'Digit6') {
+      this.switchWeaponRequest = 6;
+    } else if (e.code === 'Digit7') {
+      this.switchWeaponRequest = 7;
+    } else if (e.code === 'Digit8') {
+      this.switchWeaponRequest = 8;
     } else if (e.code === 'KeyC') {
       const horizSpeed = Math.hypot(this.velocity.x, this.velocity.z);
       if (
@@ -318,6 +328,27 @@ export class Player {
     }
   }
 
+  /** Throttle (-1..1), steer (-1..1), handbrake for vehicle control. */
+  getVehicleInput(): { throttle: number; steer: number; handbrake: boolean } {
+    const throttle =
+      (this.keys.has('KeyW') || this.keys.has('ArrowUp') ? 1 : 0) -
+      (this.keys.has('KeyS') || this.keys.has('ArrowDown') ? 1 : 0);
+    const steer =
+      (this.keys.has('KeyA') || this.keys.has('ArrowLeft') ? 1 : 0) -
+      (this.keys.has('KeyD') || this.keys.has('ArrowRight') ? 1 : 0);
+    return {
+      throttle,
+      steer,
+      handbrake: this.keys.has('Space'),
+    };
+  }
+
+  consumeInteractPressed(): boolean {
+    const pressed = this.interactJustPressed;
+    this.interactJustPressed = false;
+    return pressed;
+  }
+
   consumeWeaponInputs(): {
     fireHeld: boolean;
     fireJustPressed: boolean;
@@ -325,7 +356,7 @@ export class Player {
     reloadJustPressed: boolean;
     meleeJustPressed: boolean;
     grenadeJustPressed: boolean;
-    switchWeapon: 1 | 2 | 3 | 4 | 5 | null;
+    switchWeapon: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | null;
     wheelDelta: -1 | 0 | 1;
   } {
     const out = {

@@ -1,10 +1,81 @@
-export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover';
+export type GamePhase = 'title' | 'playing' | 'paused' | 'gameover' | 'levelclear';
+
+export type GameMode = 'solo' | 'multi';
+
+/** Custom-lobby match ruleset selected by the host. */
+export type MatchModeId = 'survival' | 'tdm' | 'ffa' | 'zone_control';
+
+export type DifficultyTierId = 'easy' | 'medium' | 'hard';
+
+export interface LevelInfo {
+  level: number;
+  label: 'EASY' | 'MEDIUM' | 'HARD' | 'EXTREME';
+  waveInLevel: number;
+  wavesPerLevel: number;
+}
+
+export interface VehicleHudInfo {
+  active: boolean;
+  nearPrompt: boolean;
+  speedKmh: number;
+  label: string;
+}
+
+export interface RadiationHudInfo {
+  active: boolean;
+  intensity: number; // 0..1
+  dps: number;
+}
+
+export interface MultiplayerPeer {
+  id: string;
+  nickname: string;
+  ready: boolean;
+  isHost: boolean;
+  skin?: WeaponSkinId;
+  status?: string;
+}
+
+export interface ScoreEntry {
+  id: string;
+  nickname: string;
+  kills: number;
+  deaths: number;
+  team: 'alpha' | 'bravo' | null;
+  isSelf: boolean;
+}
+
+export interface MultiplayerHudInfo {
+  enabled: boolean;
+  roomCode: string;
+  nickname: string;
+  isHost: boolean;
+  connected: boolean;
+  peers: MultiplayerPeer[];
+  matchMode: MatchModeId;
+  tier: DifficultyTierId;
+  scores: ScoreEntry[];
+}
 
 export type GraphicsQuality = 'high' | 'medium';
 
-export type WeaponId = 'rifle' | 'pistol' | 'shotgun' | 'marksman' | 'knife';
+export type WeaponId =
+  | 'rifle'
+  | 'pistol'
+  | 'shotgun'
+  | 'marksman'
+  | 'knife'
+  | 'smg'
+  | 'lmg'
+  | 'deagle';
 
-export type MapId = 'dusk_yard' | 'arctic_outpost' | 'desert_compound';
+export type MapId =
+  | 'dusk_yard'
+  | 'arctic_outpost'
+  | 'desert_compound'
+  | 'neon_docks'
+  | 'highland_ridge'
+  | 'sunken_foundry';
 
 export type ZoneId = 'landing' | 'building' | 'forest' | 'restriction' | 'central';
 
@@ -29,13 +100,17 @@ export interface GameSettings {
   muted: boolean;
   mapId: MapId;
   weaponSkin: WeaponSkinId;
+  mode: GameMode;
+  matchMode: MatchModeId;
+  tier: DifficultyTierId;
+  level: number;
 }
 
 export interface WeaponSpec {
   id: WeaponId;
   name: string;
   shortLabel: string;
-  keyBind: '1' | '2' | '3' | '4' | '5';
+  keyBind: '1' | '2' | '3' | '4' | '5' | '6' | '7' | '8';
   automatic: boolean;
   fireRate: number; // rounds or swings per second
   damage: number;
@@ -124,6 +199,10 @@ export interface HudSnapshot {
   pointerLocked: boolean;
   killFeed: KillFeedEntry[];
   stats: RunStats;
+  levelInfo: LevelInfo;
+  vehicle: VehicleHudInfo;
+  radiation: RadiationHudInfo;
+  multiplayer: MultiplayerHudInfo;
 }
 
 export interface AABB2D {

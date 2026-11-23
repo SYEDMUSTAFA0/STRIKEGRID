@@ -6,6 +6,10 @@ export interface PBRTextureSet {
   roughnessMap: THREE.CanvasTexture;
 }
 
+export interface FacialTextureSet extends PBRTextureSet {
+  bumpMap: THREE.CanvasTexture;
+}
+
 function mulberry32(seed: number): () => number {
   let a = seed >>> 0;
   return () => {
@@ -109,6 +113,11 @@ export class ProceduralTextureLibrary {
 
   private trackSet(set: PBRTextureSet): PBRTextureSet {
     this.disposables.push(set.map, set.normalMap, set.roughnessMap);
+    return set;
+  }
+
+  private trackFacialSet(set: FacialTextureSet): FacialTextureSet {
+    this.disposables.push(set.map, set.normalMap, set.roughnessMap, set.bumpMap);
     return set;
   }
 
@@ -1021,6 +1030,203 @@ export class ProceduralTextureLibrary {
     rctx.putImageData(rImg, 0, 0);
 
     return this.trackSet(finalizeSet(albedo, rough, height, size, 1.8, this.maxAnisotropy, 2, 3));
+  }
+
+  createSkinSurfaceSet(seed = 1201): FacialTextureSet {
+    const size = 512;
+    const rng = mulberry32(seed);
+    const albedo = document.createElement('canvas');
+    albedo.width = size;
+    albedo.height = size;
+    const actx = albedo.getContext('2d')!;
+
+    const rough = document.createElement('canvas');
+    rough.width = size;
+    rough.height = size;
+    const rctx = rough.getContext('2d')!;
+
+    const aImg = actx.createImageData(size, size);
+    const rImg = rctx.createImageData(size, size);
+    const height = new Float32Array(size * size);
+
+    for (let y = 0; y < size; y++) {
+      const v = y / size;
+      for (let x = 0; x < size; x++) {
+        const i = y * size + x;
+        const pore = rng();
+        const micro = rng();
+        const blotch =
+          Math.sin(x * 0.018 + Math.sin(y * 0.011) * 2.0) * 0.5 +
+          Math.cos(y * 0.016 - x * 0.007) * 0.35 +
+          Math.sin((x + y) * 0.006) * 0.25;
+        const poreMask = pore > 0.965 ? 1 : 0;
+        const wrinkle = Math.sin(y * 0.11 + Math.sin(x * 0.04) * 2.4) * 0.5;
+        const oilTZone = v < 0.34 ? -7 : v > 0.78 ? 5 : 0;
+
+        const idx = i * 4;
+        const base = 242 + blotch * 7 + (micro - 0.5) * 9 + oilTZone - poreMask * 26;
+        aImg.data[idx] = Math.max(205, Math.min(255, base));
+        aImg.data[idx + 1] = Math.max(198, Math.min(255, base - 5));
+        aImg.data[idx + 2] = Math.max(190, Math.min(255, base - 12));
+        aImg.data[idx + 3] = 255;
+
+        const roughVal = Math.max(
+          120,
+          Math.min(242, 188 + blotch * 18 + (rng() - 0.5) * 34 + poreMask * 18 - oilTZone * 0.6),
+        );
+        rImg.data[idx] = roughVal;
+        rImg.data[idx + 1] = roughVal;
+        rImg.data[idx + 2] = roughVal;
+        rImg.data[idx + 3] = 255;
+
+        height[i] =
+          (poreMask ? -0.85 : pore * 0.18) +
+          micro * 0.12 +
+          wrinkle * 0.08 +
+          blotch * 0.05;
+      }
+    }
+    actx.putImageData(aImg, 0, 0);
+    rctx.putImageData(rImg, 0, 0);
+
+    actx.save();
+    actx.globalCompositeOperation = 'multiply';
+    for (const [cx, cy, r, alpha] of [
+      [0.24, 0.42, 0.22, 0.055],
+      [0.76, 0.42, 0.22, 0.055],
+      [0.5, 0.12, 0.42, 0.045],
+    ] as const) {
+      const grad = actx.createRadialGradient(
+        size * cx,
+        size * cy,
+        0,
+        size * cx,
+        size * cy,
+        size * r,
+      );
+      grad.addColorStop(0, `rgba(178, 112, 82, ${alpha})`);
+      grad.addColorStop(1, 'rgba(178, 112, 82, 0)');
+      actx.fillStyle = grad;
+      actx.fillRect(0, 0, size, size);
+    }
+    actx.restore();
+
+    const bumpCanvas = document.createElement('canvas');
+    bumpCanvas.width = size;
+    bumpCanvas.height = size;
+    const bctx = bumpCanvas.getContext('2d')!;
+    const bImg = bctx.createImageData(size, size);
+    for (let i = 0; i < size * size; i++) {
+      const v = Math.max(0, Math.min(255, Math.round(128 + height[i] * 72)));
+      const idx = i * 4;
+      bImg.data[idx] = v;
+      bImg.data[idx + 1] = v;
+      bImg.data[idx + 2] = v;
+      bImg.data[idx + 3] = 255;
+    }
+    bctx.putImageData(bImg, 0, 0);
+    const bumpMap = new THREE.CanvasTexture(bumpCanvas);
+    bumpMap.wrapS = THREE.RepeatWrapping;
+    bumpMap.wrapT = THREE.RepeatWrapping;
+    bumpMap.anisotropy = this.maxAnisotropy;
+
+    const pbr = finalizeSet(albedo, rough, height, size, 1.25, this.maxAnisotropy, 1, 1);
+    return this.trackFacialSet({ ...pbr, bumpMap });
+  }
+
+  createTacticalWeaveSet(
+    baseRgb: [number, number, number],
+    seed: number,
+    repeat = 6,
+  ): PBRTextureSet {
+    const size = 256;
+    const rng = mulberry32(seed);
+    const albedo = document.createElement('canvas');
+    albedo.width = size;
+    albedo.height = size;
+    const actx = albedo.getContext('2d')!;
+
+    const rough = document.createElement('canvas');
+    rough.width = size;
+    rough.height = size;
+    const rctx = rough.getContext('2d')!;
+
+    const aImg = actx.createImageData(size, size);
+    const rImg = rctx.createImageData(size, size);
+    const height = new Float32Array(size * size);
+    const cell = 5;
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = y * size + x;
+        const cx = Math.floor(x / cell);
+        const cy = Math.floor(y / cell);
+        const warp = (cx + cy) % 2 === 0;
+        const thread = warp ? (y % cell) / cell : (x % cell) / cell;
+        const crown = Math.sin(thread * Math.PI);
+        const noise = (rng() - 0.5) * 12;
+        const shade = warp ? 1.08 : 0.9;
+        const idx = i * 4;
+        aImg.data[idx] = Math.min(255, Math.max(8, baseRgb[0] * shade * crown + noise));
+        aImg.data[idx + 1] = Math.min(255, Math.max(8, baseRgb[1] * shade * crown + noise));
+        aImg.data[idx + 2] = Math.min(255, Math.max(8, baseRgb[2] * shade * crown + noise));
+        aImg.data[idx + 3] = 255;
+
+        const rVal = Math.min(248, Math.max(120, 205 + noise + crown * 18));
+        rImg.data[idx] = rVal;
+        rImg.data[idx + 1] = rVal;
+        rImg.data[idx + 2] = rVal;
+        rImg.data[idx + 3] = 255;
+
+        height[i] = crown * (warp ? 0.45 : -0.35) + noise * 0.008;
+      }
+    }
+    actx.putImageData(aImg, 0, 0);
+    rctx.putImageData(rImg, 0, 0);
+    return this.trackSet(finalizeSet(albedo, rough, height, size, 1.45, this.maxAnisotropy, repeat, repeat));
+  }
+
+  createStubbleHairSet(seed = 1502): PBRTextureSet {
+    const size = 256;
+    const rng = mulberry32(seed);
+    const albedo = document.createElement('canvas');
+    albedo.width = size;
+    albedo.height = size;
+    const actx = albedo.getContext('2d')!;
+
+    const rough = document.createElement('canvas');
+    rough.width = size;
+    rough.height = size;
+    const rctx = rough.getContext('2d')!;
+
+    const aImg = actx.createImageData(size, size);
+    const rImg = rctx.createImageData(size, size);
+    const height = new Float32Array(size * size);
+
+    for (let y = 0; y < size; y++) {
+      for (let x = 0; x < size; x++) {
+        const i = y * size + x;
+        const strand = Math.sin(y * 0.82 + Math.sin(x * 0.09) * 2.2) > -0.15;
+        const density = rng();
+        const shade = strand && density > 0.28 ? 1 : 0.55;
+        const idx = i * 4;
+        aImg.data[idx] = Math.min(255, Math.max(10, 48 * shade + (rng() - 0.5) * 14));
+        aImg.data[idx + 1] = Math.min(255, Math.max(8, 39 * shade + (rng() - 0.5) * 12));
+        aImg.data[idx + 2] = Math.min(255, Math.max(8, 33 * shade + (rng() - 0.5) * 10));
+        aImg.data[idx + 3] = 255;
+
+        const rVal = Math.min(250, Math.max(190, 232 + (rng() - 0.5) * 18));
+        rImg.data[idx] = rVal;
+        rImg.data[idx + 1] = rVal;
+        rImg.data[idx + 2] = rVal;
+        rImg.data[idx + 3] = 255;
+
+        height[i] = strand ? 0.45 + density * 0.2 : -0.25;
+      }
+    }
+    actx.putImageData(aImg, 0, 0);
+    rctx.putImageData(rImg, 0, 0);
+    return this.trackSet(finalizeSet(albedo, rough, height, size, 1.9, this.maxAnisotropy, 4, 4));
   }
 
   dispose(): void {

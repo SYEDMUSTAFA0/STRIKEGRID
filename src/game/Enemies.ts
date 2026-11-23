@@ -10,6 +10,7 @@ import {
   resolveCircleAABBs,
 } from './rules';
 import { ProceduralTextureLibrary } from './textures';
+import { findNamedDescendant, loadOptionalModel, normalizeModelHeight } from './modelAssets';
 import type { EnemyAIState, EnemyArchetype, EnemyRole, WeaponSkinId } from './types';
 import type { World } from './World';
 import type { SoundEngine } from './Audio';
@@ -129,6 +130,11 @@ interface EnemyActor {
   breathPhase: number;
   speedMult: number;
   accuracy: number;
+  /** Holds position at post until spotted / provoked (no waypoint patrol). */
+  holdPosition: boolean;
+  postYaw: number;
+  lookTimer: number;
+  lookTargetYaw: number;
 }
 
 export class Enemies {
@@ -143,15 +149,30 @@ export class Enemies {
     jawLathe: THREE.LatheGeometry;
     neck: THREE.LatheGeometry;
     brow: THREE.ExtrudeGeometry;
-    nose: THREE.ExtrudeGeometry;
+    browRidge: THREE.CapsuleGeometry;
+    noseBridge: THREE.CapsuleGeometry;
+    noseTip: THREE.SphereGeometry;
+    nostril: THREE.SphereGeometry;
     cheekbone: THREE.CapsuleGeometry;
     ear: THREE.SphereGeometry;
+    earHelix: THREE.TorusGeometry;
+    earLobe: THREE.SphereGeometry;
     eyeWhite: THREE.SphereGeometry;
+    eyeIris: THREE.SphereGeometry;
     eyePupil: THREE.SphereGeometry;
-    helmetDome: THREE.LatheGeometry;
+    eyeCornea: THREE.SphereGeometry;
+    upperLid: THREE.TorusGeometry;
+    lowerLid: THREE.TorusGeometry;
+    socketRim: THREE.TorusGeometry;
+    lip: THREE.SphereGeometry;
+    mouthSeam: THREE.TorusGeometry;
+    hairCap: THREE.SphereGeometry;
+    helmetDome: THREE.SphereGeometry;
     helmetRail: THREE.ExtrudeGeometry;
     nvgMount: THREE.ExtrudeGeometry;
+    nvgHousing: THREE.BoxGeometry;
     headsetCup: THREE.LatheGeometry;
+    headsetBand: THREE.TorusGeometry;
     micBoom: THREE.TubeGeometry;
     goggleVisor: THREE.ExtrudeGeometry;
     balaclava: THREE.LatheGeometry;
@@ -187,16 +208,23 @@ export class Enemies {
   private readonly darkGearMat: THREE.MeshStandardMaterial;
   private readonly bootMat: THREE.MeshStandardMaterial;
   private readonly balaclavaMat: THREE.MeshStandardMaterial;
+  private readonly hairMat: THREE.MeshStandardMaterial;
+  private readonly stubbleMat: THREE.MeshStandardMaterial;
   private readonly skinMats: THREE.MeshStandardMaterial[];
   private readonly uniformMats: Record<EnemyArchetype, THREE.MeshStandardMaterial>;
   private readonly helmetMats: Record<EnemyArchetype, THREE.MeshStandardMaterial>;
-  private readonly eyeWhiteMat: THREE.MeshStandardMaterial;
+  private readonly visorMats: Record<EnemyArchetype, THREE.MeshPhysicalMaterial>;
+  private readonly eyeWhiteMat: THREE.MeshPhysicalMaterial;
+  private readonly eyeIrisMat: THREE.MeshPhysicalMaterial;
   private readonly eyePupilMat: THREE.MeshStandardMaterial;
+  private readonly eyeCorneaMat: THREE.MeshPhysicalMaterial;
   private readonly enemyRifleBodyMat: THREE.MeshStandardMaterial;
   private readonly enemyRifleBarrelMat: THREE.MeshStandardMaterial;
   private readonly enemyRifleMagMat: THREE.MeshStandardMaterial;
   private readonly arcticCamoTex: ReturnType<ProceduralTextureLibrary['createArcticCamoSet']>;
   private readonly carbonTex: ReturnType<ProceduralTextureLibrary['createCarbonFiberSet']>;
+  private optionalHeadTemplate: THREE.Object3D | null = null;
+  private optionalHeadRequest = false;
 
   constructor(
     private readonly scene: THREE.Scene,
@@ -209,26 +237,20 @@ export class Enemies {
     this.arcticCamoTex = this.texLib.createArcticCamoSet();
     this.carbonTex = this.texLib.createCarbonFiberSet();
 
-    // Sculpted jaw/chin lathe profile (narrow neck taper -> jawline -> cheekbones)
+    // Sculpted jaw/chin lathe profile (neck taper -> jawline -> cheekbones -> chin)
     const jawProfile = [
-      new THREE.Vector2(0.048, -0.055),
-      new THREE.Vector2(0.072, -0.028),
-      new THREE.Vector2(0.094, 0.008),
-      new THREE.Vector2(0.103, 0.048),
-      new THREE.Vector2(0.095, 0.08),
+      new THREE.Vector2(0.048, -0.068),
+      new THREE.Vector2(0.078, -0.038),
+      new THREE.Vector2(0.104, -0.002),
+      new THREE.Vector2(0.118, 0.042),
+      new THREE.Vector2(0.112, 0.082),
+      new THREE.Vector2(0.078, 0.106),
+      new THREE.Vector2(0.042, 0.112),
     ];
     const neckProfile = [
       new THREE.Vector2(0.058, -0.045),
       new THREE.Vector2(0.05, 0.0),
       new THREE.Vector2(0.048, 0.045),
-    ];
-    // Sculpted ballistic high-cut helmet shell
-    const helmetProfile = [
-      new THREE.Vector2(0.128, -0.015),
-      new THREE.Vector2(0.133, 0.032),
-      new THREE.Vector2(0.118, 0.088),
-      new THREE.Vector2(0.075, 0.126),
-      new THREE.Vector2(0.0, 0.138),
     ];
     const headsetProfile = [
       new THREE.Vector2(0.0, -0.016),
@@ -318,26 +340,45 @@ export class Enemies {
     bootGeo.rotateY(-Math.PI / 2);
 
     this.sharedGeos = {
-      cranium: new THREE.SphereGeometry(0.108, 14, 12),
-      jawLathe: new THREE.LatheGeometry(jawProfile, 14),
-      neck: new THREE.LatheGeometry(neckProfile, 12),
+      cranium: new THREE.SphereGeometry(0.108, 24, 18),
+      jawLathe: new THREE.LatheGeometry(jawProfile, 18),
+      neck: new THREE.LatheGeometry(neckProfile, 14),
       brow: makeCurvedArcGeo(0.082, 0.106, -0.55, 0.55, 0.02, 0.004),
-      nose: makeExtrudedGeo(
-        [
-          [0, 0.024],
-          [0.022, -0.018],
-          [0.005, -0.024],
-          [-0.006, 0.0],
-        ],
-        0.02,
-        0.004,
-        0.004,
-      ),
+      browRidge: new THREE.CapsuleGeometry(0.016, 0.052, 4, 8),
+      noseBridge: new THREE.CapsuleGeometry(0.015, 0.052, 4, 8),
+      noseTip: new THREE.SphereGeometry(0.024, 14, 10),
+      nostril: new THREE.SphereGeometry(0.008, 8, 6),
       cheekbone: new THREE.CapsuleGeometry(0.018, 0.04, 4, 8),
-      ear: new THREE.SphereGeometry(0.024, 8, 6),
-      eyeWhite: new THREE.SphereGeometry(0.015, 8, 6),
-      eyePupil: new THREE.SphereGeometry(0.008, 6, 6),
-      helmetDome: new THREE.LatheGeometry(helmetProfile, 16),
+      ear: new THREE.SphereGeometry(0.024, 10, 8),
+      earHelix: new THREE.TorusGeometry(0.029, 0.0065, 6, 16),
+      earLobe: new THREE.SphereGeometry(0.017, 8, 6),
+      eyeWhite: new THREE.SphereGeometry(0.017, 16, 12),
+      eyeIris: new THREE.SphereGeometry(0.0085, 10, 8),
+      eyePupil: new THREE.SphereGeometry(0.0045, 8, 6),
+      eyeCornea: new THREE.SphereGeometry(0.019, 16, 12),
+      upperLid: new THREE.TorusGeometry(0.021, 0.005, 6, 14, Math.PI),
+      lowerLid: new THREE.TorusGeometry(0.02, 0.004, 6, 14, Math.PI),
+      socketRim: new THREE.TorusGeometry(0.026, 0.004, 6, 18),
+      lip: new THREE.SphereGeometry(0.022, 12, 10),
+      mouthSeam: new THREE.TorusGeometry(0.031, 0.003, 5, 18, Math.PI),
+      hairCap: new THREE.SphereGeometry(
+        0.121,
+        20,
+        14,
+        Math.PI * 0.56,
+        Math.PI * 1.84,
+        0,
+        Math.PI * 0.56,
+      ),
+      helmetDome: new THREE.SphereGeometry(
+        0.134,
+        24,
+        16,
+        Math.PI * 0.56,
+        Math.PI * 1.88,
+        0,
+        Math.PI * 0.62,
+      ),
       helmetRail: makeExtrudedGeo(
         [
           [-0.055, -0.012],
@@ -360,7 +401,9 @@ export class Enemies {
         0.004,
         0.004,
       ),
+      nvgHousing: new THREE.BoxGeometry(0.052, 0.036, 0.072),
       headsetCup: new THREE.LatheGeometry(headsetProfile, 12),
+      headsetBand: new THREE.TorusGeometry(0.116, 0.007, 6, 20, Math.PI),
       micBoom: new THREE.TubeGeometry(micCurve, 10, 0.0045, 6, false),
       goggleVisor: makeCurvedArcGeo(0.088, 0.114, -0.78, 0.78, 0.044, 0.006),
       balaclava: new THREE.LatheGeometry(balaclavaProfile, 14),
@@ -469,7 +512,8 @@ export class Enemies {
     this.sharedGeos.headsetCup.rotateZ(Math.PI / 2);
     this.sharedGeos.collarGuard.rotateX(Math.PI / 2);
     this.sharedGeos.helmetRail.rotateY(Math.PI / 2);
-    this.sharedGeos.nose.rotateY(Math.PI / 2);
+    this.sharedGeos.earHelix.rotateY(Math.PI / 2);
+    this.sharedGeos.lowerLid.rotateZ(Math.PI);
 
     this.shadowMat = new THREE.MeshBasicMaterial({
       color: 0x000000,
@@ -487,18 +531,103 @@ export class Enemies {
       roughness: 0.85,
       metalness: 0.1,
     });
+    const skinTex = this.texLib.createSkinSurfaceSet(1201);
+    const stubbleTex = this.texLib.createStubbleHairSet(1502);
+    const hairTex = this.texLib.createStubbleHairSet(1503);
+    const balaclavaTex = this.texLib.createTacticalWeaveSet([38, 43, 52], 1504, 5);
+
     this.balaclavaMat = new THREE.MeshStandardMaterial({
-      color: 0x22262e,
-      roughness: 0.9,
-      metalness: 0.04,
+      color: 0xffffff,
+      map: balaclavaTex.map,
+      normalMap: balaclavaTex.normalMap,
+      roughnessMap: balaclavaTex.roughnessMap,
+      roughness: 0.92,
+      metalness: 0.03,
+      envMapIntensity: 0.45,
     });
-    this.eyeWhiteMat = new THREE.MeshStandardMaterial({ color: 0xeee8e0, roughness: 0.2 });
-    this.eyePupilMat = new THREE.MeshStandardMaterial({ color: 0x1a1412, roughness: 0.1 });
+    this.hairMat = new THREE.MeshStandardMaterial({
+      color: 0x6f5a45,
+      map: hairTex.map,
+      normalMap: hairTex.normalMap,
+      roughnessMap: hairTex.roughnessMap,
+      bumpMap: hairTex.normalMap,
+      roughness: 1.0,
+      metalness: 0.02,
+      envMapIntensity: 0.35,
+    });
+    this.stubbleMat = new THREE.MeshStandardMaterial({
+      color: 0x4a3a30,
+      map: stubbleTex.map,
+      normalMap: stubbleTex.normalMap,
+      roughnessMap: stubbleTex.roughnessMap,
+      bumpMap: stubbleTex.normalMap,
+      roughness: 1.0,
+      metalness: 0.02,
+      envMapIntensity: 0.4,
+    });
+    this.eyeWhiteMat = new THREE.MeshPhysicalMaterial({
+      color: 0xf3ede6,
+      roughness: 0.16,
+      metalness: 0.0,
+      clearcoat: 0.65,
+      clearcoatRoughness: 0.18,
+      envMapIntensity: 0.9,
+    });
+    this.eyeIrisMat = new THREE.MeshPhysicalMaterial({
+      color: 0x6b4a2e,
+      roughness: 0.18,
+      metalness: 0.0,
+      clearcoat: 0.85,
+      clearcoatRoughness: 0.12,
+      envMapIntensity: 1.4,
+    });
+    this.eyePupilMat = new THREE.MeshStandardMaterial({ color: 0x120d0b, roughness: 0.08 });
+    this.eyeCorneaMat = new THREE.MeshPhysicalMaterial({
+      color: 0xffffff,
+      roughness: 0.02,
+      metalness: 0.0,
+      transparent: true,
+      opacity: 0.24,
+      clearcoat: 1.0,
+      clearcoatRoughness: 0.04,
+      envMapIntensity: 2.1,
+      depthWrite: false,
+    });
 
     this.skinMats = [
-      new THREE.MeshStandardMaterial({ color: 0xd5a182, roughness: 0.68, metalness: 0.02 }),
-      new THREE.MeshStandardMaterial({ color: 0xb98262, roughness: 0.68, metalness: 0.02 }),
-      new THREE.MeshStandardMaterial({ color: 0x7a5039, roughness: 0.68, metalness: 0.02 }),
+      new THREE.MeshStandardMaterial({
+        color: 0xd5a182,
+        map: skinTex.map,
+        normalMap: skinTex.normalMap,
+        roughnessMap: skinTex.roughnessMap,
+        bumpMap: skinTex.bumpMap,
+        bumpScale: 0.65,
+        roughness: 1.0,
+        metalness: 0.02,
+        envMapIntensity: 0.55,
+      }),
+      new THREE.MeshStandardMaterial({
+        color: 0xb98262,
+        map: skinTex.map,
+        normalMap: skinTex.normalMap,
+        roughnessMap: skinTex.roughnessMap,
+        bumpMap: skinTex.bumpMap,
+        bumpScale: 0.65,
+        roughness: 1.0,
+        metalness: 0.02,
+        envMapIntensity: 0.55,
+      }),
+      new THREE.MeshStandardMaterial({
+        color: 0x7a5039,
+        map: skinTex.map,
+        normalMap: skinTex.normalMap,
+        roughnessMap: skinTex.roughnessMap,
+        bumpMap: skinTex.bumpMap,
+        bumpScale: 0.65,
+        roughness: 1.0,
+        metalness: 0.02,
+        envMapIntensity: 0.55,
+      }),
     ];
 
     const makeUniform = (rgb: [number, number, number], seed: number) => {
@@ -520,9 +649,68 @@ export class Enemies {
     };
 
     this.helmetMats = {
-      trooper: new THREE.MeshStandardMaterial({ color: 0x424a3e, roughness: 0.55, metalness: 0.25 }),
-      striker: new THREE.MeshStandardMaterial({ color: 0x2a2f38, roughness: 0.5, metalness: 0.3 }),
-      juggernaut: new THREE.MeshStandardMaterial({ color: 0x2f3136, roughness: 0.42, metalness: 0.55 }),
+      trooper: new THREE.MeshPhysicalMaterial({
+        color: 0x424a3e,
+        roughness: 0.42,
+        metalness: 0.35,
+        clearcoat: 0.55,
+        clearcoatRoughness: 0.24,
+        envMapIntensity: 1.15,
+      }),
+      striker: new THREE.MeshPhysicalMaterial({
+        color: 0x2a2f38,
+        roughness: 0.38,
+        metalness: 0.42,
+        clearcoat: 0.6,
+        clearcoatRoughness: 0.2,
+        envMapIntensity: 1.2,
+      }),
+      juggernaut: new THREE.MeshPhysicalMaterial({
+        color: 0x2f3136,
+        roughness: 0.3,
+        metalness: 0.62,
+        clearcoat: 0.7,
+        clearcoatRoughness: 0.16,
+        envMapIntensity: 1.35,
+      }),
+    };
+    this.visorMats = {
+      trooper: new THREE.MeshPhysicalMaterial({
+        color: 0x101a24,
+        roughness: 0.07,
+        metalness: 0.22,
+        transparent: true,
+        opacity: 0.46,
+        clearcoat: 1,
+        clearcoatRoughness: 0.05,
+        envMapIntensity: 1.9,
+        emissive: ENEMY_SPECS.trooper.accentHex,
+        emissiveIntensity: 0.12,
+      }),
+      striker: new THREE.MeshPhysicalMaterial({
+        color: 0x0c1218,
+        roughness: 0.08,
+        metalness: 0.18,
+        transparent: true,
+        opacity: 0.5,
+        clearcoat: 1,
+        clearcoatRoughness: 0.06,
+        envMapIntensity: 1.8,
+        emissive: ENEMY_SPECS.striker.accentHex,
+        emissiveIntensity: 0.1,
+      }),
+      juggernaut: new THREE.MeshPhysicalMaterial({
+        color: 0x080b10,
+        roughness: 0.05,
+        metalness: 0.28,
+        transparent: true,
+        opacity: 0.62,
+        clearcoat: 1,
+        clearcoatRoughness: 0.04,
+        envMapIntensity: 2.0,
+        emissive: ENEMY_SPECS.juggernaut.accentHex,
+        emissiveIntensity: 0.14,
+      }),
     };
 
     this.enemyRifleBodyMat = new THREE.MeshStandardMaterial({
@@ -541,6 +729,34 @@ export class Enemies {
       metalness: 0.1,
     });
     this.setWeaponSkin(initialSkin);
+    this.requestOptionalHeadAsset();
+  }
+
+  private requestOptionalHeadAsset(): void {
+    if (this.optionalHeadRequest) return;
+    this.optionalHeadRequest = true;
+    void loadOptionalModel(['/models/soldier.glb', '/models/soldier_head.glb']).then((model) => {
+      if (!model) return;
+      const headNode = findNamedDescendant(model, /head|face|helmet/i);
+      if (!headNode) return;
+      this.optionalHeadTemplate = headNode;
+      for (const actor of this.actors) {
+        this.applyExternalHead(actor.headGroup);
+      }
+    });
+  }
+
+  private applyExternalHead(headGroup: THREE.Group): void {
+    if (!this.optionalHeadTemplate || headGroup.userData.externalHeadApplied) return;
+    const clone = this.optionalHeadTemplate.clone(true);
+    const wrapper = normalizeModelHeight(clone, 0.36, 0.14);
+    if (!wrapper) return;
+    wrapper.userData.externalHeadApplied = true;
+    for (const child of headGroup.children) {
+      child.visible = false;
+    }
+    headGroup.add(wrapper);
+    headGroup.userData.externalHeadApplied = true;
   }
 
   setWeaponSkin(skin: WeaponSkinId): void {
@@ -606,9 +822,9 @@ export class Enemies {
     this.activeTokenCount = 0;
   }
 
-  spawnWave(wave: number, playerPos: THREE.Vector3): void {
+  spawnWave(wave: number, playerPos: THREE.Vector3, level = 1): void {
     this.clearAll();
-    const cfg = getWaveConfig(wave);
+    const cfg = getWaveConfig(wave, level);
     const validSpawns = this.world.spawnPoints.filter(
       (sp) => sp.distanceToSquared(playerPos) > 16 * 16,
     );
@@ -651,18 +867,14 @@ export class Enemies {
     const skinMat = this.skinMats[id % this.skinMats.length];
     const uniformMat = this.uniformMats[archetype];
     const helmetMat = this.helmetMats[archetype];
+    const visorMat = this.visorMats[archetype];
     const vestMat = new THREE.MeshStandardMaterial({
       color: spec.colorHex,
       roughness: 0.62,
       metalness: 0.25,
     });
-    const goggleMat = new THREE.MeshStandardMaterial({
-      color: spec.accentHex,
-      emissive: spec.accentHex,
-      emissiveIntensity: 1.35,
-      roughness: 0.15,
-      metalness: 0.4,
-    });
+    const facialHairMat = id % 5 === 0 ? this.stubbleMat : null;
+    const hairStyle = id % 4;
 
     const bodyParts: THREE.Mesh[] = [];
     const registerHitbox = (mesh: THREE.Mesh, zone: 'head' | 'torso' | 'limb') => {
@@ -759,79 +971,255 @@ export class Enemies {
 
     torsoPivot.add(torsoCore, collar, plateFront, plateBack, backpack, packFlap, canteen, antenna);
 
-    // ---- SCULPTED HUMAN HEAD, CURVED VISOR & BALLISTIC HELMET ----
+    // ---- SCULPTED 3D HUMAN HEAD, FACIAL ANATOMY & TACTICAL HEADGEAR ----
     const headGroup = new THREE.Group();
     headGroup.position.set(0, 0.56, 0.01);
     torsoPivot.add(headGroup);
 
-    const neck = new THREE.Mesh(this.sharedGeos.neck, skinMat);
-    neck.position.y = -0.015;
+    const headStyle =
+      archetype === 'juggernaut'
+        ? 'heavy'
+        : archetype === 'striker'
+          ? 'balaclava'
+          : id % 3 === 0
+            ? 'exposed'
+            : 'helmet';
+    const useGoggles = headStyle !== 'exposed' || id % 2 === 0;
+    const useHeadset = archetype === 'trooper';
+    const useHair = headStyle === 'exposed' && hairStyle < 2;
+    const useStubble = headStyle === 'exposed' && facialHairMat !== null;
+
+    const addFacePart = (
+      geo: THREE.BufferGeometry,
+      mat: THREE.Material,
+      x: number,
+      y: number,
+      z: number,
+      rx = 0,
+      ry = 0,
+      rz = 0,
+    ): THREE.Mesh => {
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(x, y, z);
+      mesh.rotation.set(rx, ry, rz);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      headGroup.add(mesh);
+      return mesh;
+    };
+
+    const neck = addFacePart(this.sharedGeos.neck, skinMat, 0, -0.02, 0);
+    neck.castShadow = false;
     const jaw = new THREE.Mesh(this.sharedGeos.jawLathe, skinMat);
-    jaw.position.set(0, 0.055, 0.008);
-    jaw.scale.set(0.9, 1.0, 1.04);
+    jaw.position.set(0, 0.045, 0.006);
+    jaw.scale.set(0.92, 1.0, 1.02);
     registerHitbox(jaw, 'head');
 
     const cranium = new THREE.Mesh(this.sharedGeos.cranium, skinMat);
-    cranium.position.set(0, 0.118, 0);
-    cranium.scale.set(0.92, 1.08, 1.02);
+    cranium.position.set(0, 0.125, -0.004);
+    cranium.scale.set(0.94, 1.06, 0.96);
     registerHitbox(cranium, 'head');
+    headGroup.add(jaw, cranium);
 
-    const brow = new THREE.Mesh(this.sharedGeos.brow, skinMat);
-    brow.position.set(0, 0.122, 0.005);
-    const nose = new THREE.Mesh(this.sharedGeos.nose, skinMat);
-    nose.position.set(0, 0.098, 0.1);
+    if (useStubble) {
+      const stubble = new THREE.Mesh(this.sharedGeos.jawLathe, this.stubbleMat);
+      stubble.position.set(0, 0.047, 0.008);
+      stubble.scale.set(0.95, 1.04, 1.08);
+      stubble.castShadow = true;
+      headGroup.add(stubble);
+    }
+
+    if (headStyle === 'balaclava') {
+      const balaclava = new THREE.Mesh(this.sharedGeos.balaclava, this.balaclavaMat);
+      balaclava.position.set(0, 0.04, 0.006);
+      balaclava.scale.set(1.0, 1.08, 1.04);
+      registerHitbox(balaclava, 'head');
+      headGroup.add(balaclava);
+    }
+
+    const brow = addFacePart(this.sharedGeos.brow, skinMat, 0, 0.128, 0.006);
+    brow.castShadow = false;
+    for (const side of [-1, 1]) {
+      const ridge = addFacePart(
+        this.sharedGeos.browRidge,
+        skinMat,
+        side * 0.041,
+        0.13,
+        0.096,
+        0,
+        0,
+        side * 0.42,
+      );
+      ridge.scale.set(1.15, 1, 0.8);
+    }
+
+    const noseBridge = addFacePart(
+      this.sharedGeos.noseBridge,
+      skinMat,
+      0,
+      0.108,
+      0.112,
+      -0.35,
+      0,
+      0,
+    );
+    noseBridge.scale.set(0.75, 1, 0.72);
+    const noseTip = addFacePart(this.sharedGeos.noseTip, skinMat, 0, 0.087, 0.126);
+    noseTip.scale.set(0.86, 0.72, 1.05);
+    for (const side of [-1, 1]) {
+      const nostril = addFacePart(
+        this.sharedGeos.nostril,
+        this.eyePupilMat,
+        side * 0.014,
+        0.074,
+        0.118,
+      );
+      nostril.scale.set(0.9, 0.65, 0.8);
+    }
 
     for (const side of [-1, 1]) {
-      const cheek = new THREE.Mesh(this.sharedGeos.cheekbone, skinMat);
-      cheek.position.set(side * 0.048, 0.088, 0.072);
-      cheek.rotation.set(0.25, 0, side * 0.4);
-      const ear = new THREE.Mesh(this.sharedGeos.ear, skinMat);
-      ear.position.set(side * 0.098, 0.105, -0.005);
-      ear.scale.set(0.5, 1.0, 0.75);
-      headGroup.add(cheek, ear);
+      const cheek = addFacePart(
+        this.sharedGeos.cheekbone,
+        skinMat,
+        side * 0.052,
+        0.09,
+        0.074,
+        0.25,
+        0,
+        side * 0.4,
+      );
+      cheek.scale.set(1.15, 0.9, 0.8);
+
+      const ear = addFacePart(this.sharedGeos.ear, skinMat, side * 0.104, 0.122, -0.006);
+      ear.scale.set(0.45, 1.05, 0.7);
+      const helix = addFacePart(
+        this.sharedGeos.earHelix,
+        skinMat,
+        side * 0.11,
+        0.124,
+        -0.004,
+      );
+      helix.scale.set(0.85, 1.1, 0.55);
+      const lobe = addFacePart(this.sharedGeos.earLobe, skinMat, side * 0.108, 0.1, 0.002);
+      lobe.scale.set(0.5, 0.75, 0.6);
     }
 
-    for (const ex of [-0.036, 0.036]) {
-      const ew = new THREE.Mesh(this.sharedGeos.eyeWhite, this.eyeWhiteMat);
-      ew.position.set(ex, 0.118, 0.092);
-      const ep = new THREE.Mesh(this.sharedGeos.eyePupil, this.eyePupilMat);
-      ep.position.set(ex, 0.118, 0.103);
-      headGroup.add(ew, ep);
+    for (const side of [-1, 1]) {
+      const ex = side * 0.034;
+      const socket = addFacePart(
+        this.sharedGeos.socketRim,
+        this.darkGearMat,
+        ex,
+        0.128,
+        0.095,
+      );
+      socket.scale.set(1.05, 1.15, 0.5);
+      socket.castShadow = false;
+
+      const eye = addFacePart(this.sharedGeos.eyeWhite, this.eyeWhiteMat, ex, 0.128, 0.102);
+      eye.scale.set(0.92, 1.0, 0.56);
+      eye.castShadow = false;
+      const iris = addFacePart(this.sharedGeos.eyeIris, this.eyeIrisMat, ex, 0.128, 0.111);
+      iris.scale.set(1.0, 1.0, 0.4);
+      iris.castShadow = false;
+      const pupil = addFacePart(this.sharedGeos.eyePupil, this.eyePupilMat, ex, 0.128, 0.114);
+      pupil.scale.set(0.75, 0.75, 0.38);
+      pupil.castShadow = false;
+      const cornea = addFacePart(this.sharedGeos.eyeCornea, this.eyeCorneaMat, ex, 0.128, 0.104);
+      cornea.scale.set(0.98, 1.08, 0.58);
+      cornea.castShadow = false;
+      cornea.renderOrder = 4;
+
+      const upperLid = addFacePart(
+        this.sharedGeos.upperLid,
+        skinMat,
+        ex,
+        0.136,
+        0.103,
+        -0.12,
+      );
+      upperLid.scale.set(1.05, 0.9, 0.6);
+      const lowerLid = addFacePart(
+        this.sharedGeos.lowerLid,
+        skinMat,
+        ex,
+        0.118,
+        0.103,
+        0.12,
+      );
+      lowerLid.scale.set(1.05, 0.85, 0.6);
     }
 
-    const helmet = new THREE.Mesh(this.sharedGeos.helmetDome, helmetMat);
-    helmet.position.set(0, 0.112, -0.006);
-    helmet.scale.set(0.96, 1.02, 1.05);
-    registerHitbox(helmet, 'head');
+    const upperLip = addFacePart(this.sharedGeos.lip, skinMat, 0, 0.058, 0.112);
+    upperLip.scale.set(1.35, 0.48, 0.58);
+    const lowerLip = addFacePart(this.sharedGeos.lip, skinMat, 0, 0.042, 0.11);
+    lowerLip.scale.set(1.22, 0.58, 0.62);
+    const mouth = addFacePart(this.sharedGeos.mouthSeam, this.eyePupilMat, 0, 0.05, 0.115);
+    mouth.scale.set(1.15, 0.45, 0.4);
+    mouth.rotation.x = Math.PI / 2 - 0.12;
+    mouth.castShadow = false;
 
-    const railL = new THREE.Mesh(this.sharedGeos.helmetRail, this.darkGearMat);
-    railL.position.set(-0.114, 0.142, 0.01);
-    const railR = new THREE.Mesh(this.sharedGeos.helmetRail, this.darkGearMat);
-    railR.position.set(0.114, 0.142, 0.01);
-    const nvgMount = new THREE.Mesh(this.sharedGeos.nvgMount, this.darkGearMat);
-    nvgMount.position.set(0, 0.165, 0.125);
+    if (useHair) {
+      const hair = addFacePart(this.sharedGeos.hairCap, this.hairMat, 0, 0.134, -0.006);
+      hair.scale.set(0.98, 1.03, 0.98);
+    }
 
-    const goggles = new THREE.Mesh(this.sharedGeos.goggleVisor, goggleMat);
-    goggles.position.set(0, 0.1, 0.002);
+    if (headStyle === 'helmet' || headStyle === 'heavy') {
+      const helmet = new THREE.Mesh(this.sharedGeos.helmetDome, helmetMat);
+      helmet.position.set(0, 0.132, -0.006);
+      helmet.scale.set(0.98, 1.0, 1.0);
+      registerHitbox(helmet, 'head');
+      headGroup.add(helmet);
 
-    headGroup.add(neck, jaw, cranium, brow, nose, helmet, railL, railR, nvgMount, goggles);
+      const railL = new THREE.Mesh(this.sharedGeos.helmetRail, this.darkGearMat);
+      railL.position.set(-0.116, 0.152, 0.008);
+      const railR = new THREE.Mesh(this.sharedGeos.helmetRail, this.darkGearMat);
+      railR.position.set(0.116, 0.152, 0.008);
+      headGroup.add(railL, railR);
 
-    if (archetype === 'trooper') {
-      const cupL = new THREE.Mesh(this.sharedGeos.headsetCup, this.darkGearMat);
-      cupL.position.set(-0.105, 0.1, 0);
-      const cupR = new THREE.Mesh(this.sharedGeos.headsetCup, this.darkGearMat);
-      cupR.position.set(0.105, 0.1, 0);
-      const mic = new THREE.Mesh(this.sharedGeos.micBoom, this.darkGearMat);
-      headGroup.add(cupL, cupR, mic);
-    } else if (archetype === 'striker') {
-      const balaclava = new THREE.Mesh(this.sharedGeos.balaclava, this.balaclavaMat);
-      balaclava.position.set(0, 0.048, 0.008);
-      headGroup.add(balaclava);
-    } else if (archetype === 'juggernaut') {
+      if (headStyle === 'helmet') {
+        const nvgMount = new THREE.Mesh(this.sharedGeos.nvgMount, this.darkGearMat);
+        nvgMount.position.set(0, 0.168, 0.126);
+        const nvgHousing = new THREE.Mesh(this.sharedGeos.nvgHousing, this.darkGearMat);
+        nvgHousing.position.set(0, 0.168, 0.148);
+        headGroup.add(nvgMount, nvgHousing);
+      }
+    }
+
+    if (useGoggles) {
+      const goggles = new THREE.Mesh(this.sharedGeos.goggleVisor, visorMat);
+      goggles.position.set(
+        0,
+        headStyle === 'heavy' ? 0.122 : 0.126,
+        headStyle === 'balaclava' ? 0.1 : 0.096,
+      );
+      goggles.scale.set(headStyle === 'heavy' ? 1.08 : 1.0, headStyle === 'heavy' ? 1.04 : 1.0, 0.9);
+      goggles.castShadow = false;
+      headGroup.add(goggles);
+    }
+
+    if (headStyle === 'heavy') {
       const mandible = new THREE.Mesh(this.sharedGeos.mandible, helmetMat);
-      mandible.position.set(0, 0.02, 0.004);
+      mandible.position.set(0, 0.018, 0.004);
       headGroup.add(mandible);
     }
+
+    if (useHeadset) {
+      const band = new THREE.Mesh(this.sharedGeos.headsetBand, this.darkGearMat);
+      band.position.set(0, 0.15, -0.012);
+      band.scale.set(1.02, 0.82, 0.85);
+      headGroup.add(band);
+      for (const side of [-1, 1]) {
+        const cup = new THREE.Mesh(this.sharedGeos.headsetCup, this.darkGearMat);
+        cup.position.set(side * 0.112, 0.112, -0.006);
+        cup.rotation.y = side * 0.25;
+        headGroup.add(cup);
+      }
+      const mic = new THREE.Mesh(this.sharedGeos.micBoom, this.darkGearMat);
+      headGroup.add(mic);
+    }
+
+    this.applyExternalHead(headGroup);
 
     // ---- ARTICULATED ARMS WITH JOINT CAPS, CURLED GLOVED FINGERS & SCULPTED RIFLE ----
     const buildGlove = (thumbSide: 1 | -1) => {
@@ -902,6 +1290,7 @@ export class Enemies {
 
     const startY = getSurfaceFloorHeight(x, z, 1.0, ENEMY_RADIUS, this.world.obstacles, this.world.ramps);
     group.position.set(x, startY, z);
+    group.rotation.y = Math.random() * Math.PI * 2;
     this.scene.add(group);
 
     const laserGeo = new THREE.BufferGeometry().setFromPoints([
@@ -959,7 +1348,26 @@ export class Enemies {
       breathPhase: id * 1.1,
       speedMult,
       accuracy,
+      holdPosition: true,
+      postYaw: group.rotation.y,
+      lookTimer: 1.5 + (id % 5) * 0.9,
+      lookTargetYaw: 0,
     });
+  }
+
+  /** Radius within which idle sentries proactively agitate (level-scaled). */
+  public aggroRadius = 8.5;
+
+  /** Radiation / restricted-area pulse: sentries inside radius become alert. */
+  alertNearRadiation(center: THREE.Vector3, radius: number): void {
+    for (const a of this.actors) {
+      if (a.state === 'ko') continue;
+      const dx = a.group.position.x - center.x;
+      const dz = a.group.position.z - center.z;
+      if (dx * dx + dz * dz < radius * radius) {
+        a.alertMemory = Math.max(a.alertMemory, 4.0);
+      }
+    }
   }
 
   applyDamage(
@@ -1125,8 +1533,20 @@ export class Enemies {
         player.position.x - a.group.position.x,
         player.position.z - a.group.position.z,
       );
-      const hasLOS = distToPlayer < 48 && this.checkLineOfSight(a.group.position, player.position);
+      let hasLOS = distToPlayer < 48 && this.checkLineOfSight(a.group.position, player.position);
+      if (hasLOS && a.holdPosition && distToPlayer > 4) {
+        // Sentries only visually acquire inside a forward vision cone (~150°).
+        const fx = Math.sin(a.postYaw);
+        const fz = Math.cos(a.postYaw);
+        const dx = (player.position.x - a.group.position.x) / distToPlayer;
+        const dz = (player.position.z - a.group.position.z) / distToPlayer;
+        hasLOS = fx * dx + fz * dz > -0.15;
+      }
       if (hasLOS) a.alertMemory = 4.0;
+      // Close-quarters proximity agitation for hold-position sentries
+      if (a.holdPosition && a.state === 'patrol' && distToPlayer < this.aggroRadius) {
+        a.alertMemory = Math.max(a.alertMemory, 4.0);
+      }
 
       const rolePreferredRange =
         a.role === 'marksman'
@@ -1162,9 +1582,32 @@ export class Enemies {
 
       if (a.state === 'patrol') {
         a.laserLine.visible = false;
-        a.torsoPivot.rotation.x = THREE.MathUtils.damp(a.torsoPivot.rotation.x, breathOffset + flinchPitch, 10, dt);
-        a.torsoPivot.rotation.y = THREE.MathUtils.damp(a.torsoPivot.rotation.y, 0, 8, dt);
-        this.stepPatrol(a, spec.speed * a.speedMult * 0.65, dt);
+        if (a.holdPosition) {
+          // Sentry idle: breathing, weight shift, slow look-around sweep
+          a.lookTimer -= dt;
+          if (a.lookTimer <= 0) {
+            a.lookTimer = 2.2 + Math.random() * 3.4;
+            a.lookTargetYaw = (Math.random() - 0.5) * 1.5;
+          }
+          const lookYaw = a.lookTargetYaw * 0.45;
+          a.torsoPivot.rotation.x = THREE.MathUtils.damp(
+            a.torsoPivot.rotation.x,
+            breathOffset + flinchPitch,
+            8,
+            dt,
+          );
+          a.torsoPivot.rotation.y = THREE.MathUtils.damp(a.torsoPivot.rotation.y, lookYaw, 4, dt);
+          a.headGroup.rotation.y = THREE.MathUtils.damp(
+            a.headGroup.rotation.y,
+            lookYaw * 1.6,
+            4,
+            dt,
+          );
+        } else {
+          a.torsoPivot.rotation.x = THREE.MathUtils.damp(a.torsoPivot.rotation.x, breathOffset + flinchPitch, 10, dt);
+          a.torsoPivot.rotation.y = THREE.MathUtils.damp(a.torsoPivot.rotation.y, 0, 8, dt);
+          this.stepPatrol(a, spec.speed * a.speedMult * 0.65, dt);
+        }
       } else if (a.state === 'alert') {
         if (a.role === 'marksman' && hasLOS && distToPlayer < 42) {
           a.muzzleAnchor.getWorldPosition(_muzzlePos);
@@ -1389,8 +1832,13 @@ export class Enemies {
     this.darkGearMat.dispose();
     this.bootMat.dispose();
     this.balaclavaMat.dispose();
+    this.hairMat.dispose();
+    this.stubbleMat.dispose();
     this.eyeWhiteMat.dispose();
+    this.eyeIrisMat.dispose();
     this.eyePupilMat.dispose();
+    this.eyeCorneaMat.dispose();
+    Object.values(this.visorMats).forEach((m) => m.dispose());
     this.skinMats.forEach((m) => m.dispose());
     Object.values(this.uniformMats).forEach((m) => m.dispose());
     Object.values(this.helmetMats).forEach((m) => m.dispose());

@@ -6,6 +6,9 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    // Relative asset paths so the build works inside nested iframe paths
+    // (e.g. the CrazyGames portal) as well as any static host.
+    base: './',
     plugins: [
       react(),
       tailwindcss(),

@@ -87,3 +87,94 @@ URL Query Parameters
 ?skin=standard|desert_tan|arctic_camo|carbon_gold — Pre-select a weapon finish.
 
 ?autostart=1 — Jump straight into active gameplay.
+
+## Online Play — Sign-In, Presence & Custom Lobbies
+
+SECTOR 09 ships with a full online layer that degrades gracefully:
+
+- **Player Sign-In** (`src/game/auth.ts`): email/password and Google sign-in via
+  **Supabase Auth** or **Firebase Auth** REST APIs (no SDK dependency), plus an
+  instant **Quick Callsign / Guest** flow persisted in `localStorage`. Every
+  player gets a unique Player ID and a 6-character **Friend Code**.
+- **Live Presence** (`src/game/onlinePresence.ts`): an adapter that polls
+  Supabase PostgREST (`strikegrid_players` table) or Firebase Realtime
+  Database (`/strikegrid/presence` node). Statuses: `ONLINE` / `IN LOBBY` /
+  `IN MATCH` with mode and ping.
+- **Custom Lobby** (`src/components/FriendsLobby.tsx`): friend list with
+  add-by-Friend-Code, live room invites, shareable 6-character room codes, and
+  full **host controls** — match mode (Co-op Squad Survival, Team Deathmatch,
+  Free-For-All, Zone Control), arena (all six maps), difficulty tier
+  (Easy/Medium/Hard), squad roster with ready checks, and START MATCH sync.
+- **In-Match Sync** (`src/game/multiplayer.ts`, `src/game/Engine.ts`): remote
+  operator rigs with name tags, weapon-finish tints, death poses, pose/anim
+  relay, gunfire & grenade events, live scoreboard (`Tab`), and kill feed.
+
+### Offline / demo fallback
+
+With **no env vars set**, everything still works locally: `BroadcastChannel`
+rooms sync across browser tabs, presence runs over a local heartbeat channel,
+and email/Google sign-in is replaced by Quick Callsign guest play.
+
+### Connecting a live backend
+
+Copy `.env.example` → `.env.local` and fill in ONE provider:
+
+- **Supabase**: `VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY`, then run the
+  schema below in the SQL editor.
+- **Firebase**: `VITE_FIREBASE_API_KEY` (+ `VITE_FIREBASE_PROJECT_ID` or
+  `VITE_FIREBASE_DATABASE_URL`), enable Email/Password auth, and allow RTDB
+  access to `/strikegrid/presence`.
+
+#### Supabase schema (SQL editor)
+
+```sql
+create table if not exists public.strikegrid_players (
+  id text primary key,
+  callsign text not null,
+  friend_code text,
+  status text default 'online',
+  mode text,
+  room_code text,
+  ping int default 30,
+  last_seen timestamptz default now()
+);
+alter table public.strikegrid_players enable row level security;
+-- Demo-friendly open policies (tighten for production):
+create policy "players read" on public.strikegrid_players for select using (true);
+create policy "players write" on public.strikegrid_players for all using (true) with check (true);
+
+create table if not exists public.strikegrid_invites (
+  id bigint generated always as identity primary key,
+  "to" text not null,
+  from_id text,
+  from_callsign text,
+  room_code text not null,
+  mode text,
+  created_at timestamptz default now()
+);
+alter table public.strikegrid_invites enable row level security;
+create policy "invites read" on public.strikegrid_invites for select using (true);
+create policy "invites write" on public.strikegrid_invites for all using (true) with check (true);
+```
+
+#### Firebase RTDB rules (database rules tab)
+
+```json
+{
+  "rules": {
+    "strikegrid": {
+      "presence": {
+        ".read": true,
+        ".write": true
+      }
+    }
+  }
+}
+```
+(Tighten `.write` to `auth != null` once email/Google auth is enabled.)
+
+### Testing multiplayer locally
+
+Open two browser tabs on the dev server — each tab sees the other in **Active
+Now**, can join rooms by 6-char code, invite by Friend Code, ready up, and sync
+poses/scoreboards in-match.

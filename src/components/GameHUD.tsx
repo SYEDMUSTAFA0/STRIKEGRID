@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { MAP_SPECS, WEAPON_ORDER, WEAPON_SPECS, ZONE_SPECS } from '../game/rules';
+import { MAP_SPECS, MATCH_MODE_SPECS, WEAPON_ORDER, WEAPON_SPECS, ZONE_SPECS } from '../game/rules';
 import type { HudSnapshot, MapId, WeaponId } from '../game/types';
 
 interface GameHUDProps {
@@ -8,6 +8,7 @@ interface GameHUDProps {
   muted: boolean;
   onToggleMute: () => void;
   onPause: () => void;
+  showScores?: boolean;
 }
 
 const SLOT_SHORT_NAME: Record<WeaponId, string> = {
@@ -16,9 +17,12 @@ const SLOT_SHORT_NAME: Record<WeaponId, string> = {
   shotgun: 'M870',
   marksman: 'MK-14',
   knife: 'KNIFE',
+  smg: 'SMG',
+  lmg: 'LMG',
+  deagle: 'DGL',
 };
 
-export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause }: GameHUDProps) {
+export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause, showScores = false }: GameHUDProps) {
   const ghostHealthRef = useRef(hud.health);
 
   useEffect(() => {
@@ -85,7 +89,8 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
         </div>
       )}
 
-      {/* Dynamic Center Crosshair & Hitmarker */}
+      {/* Dynamic Center Crosshair & Hitmarker (hidden while driving) */}
+      {!hud.vehicle.active && (
       <div
         className="fixed left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none"
         aria-hidden="true"
@@ -172,6 +177,7 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
           </div>
         )}
       </div>
+      )}
 
       {/* Top-Left: Wave & Hostiles Cluster + Compact Tactical Radar */}
       <div className="fixed top-4 left-5 flex flex-col items-start gap-2.5">
@@ -220,6 +226,32 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
             </div>
           );
         })()}
+
+        {/* Difficulty level chip */}
+        <div className="flex items-center gap-2 bg-[#11151d]/90 border-l-2 border-stone-600 px-3 py-1 shadow-lg">
+          <span className="text-[9px] tracking-[0.2em] uppercase text-stone-500">LV</span>
+          <span className="text-[12px] font-bold tabular-nums text-stone-100">
+            {String(hud.levelInfo.level).padStart(2, '0')}
+          </span>
+          <span className="h-3 w-px bg-stone-700/80" />
+          <span
+            className={`text-[9px] font-bold tracking-[0.18em] uppercase ${
+              hud.levelInfo.label === 'EASY'
+                ? 'text-emerald-400'
+                : hud.levelInfo.label === 'MEDIUM'
+                  ? 'text-sky-400'
+                  : hud.levelInfo.label === 'HARD'
+                    ? 'text-orange-400'
+                    : 'text-red-400'
+            }`}
+          >
+            {hud.levelInfo.label}
+          </span>
+          <span className="h-3 w-px bg-stone-700/80" />
+          <span className="text-[9px] tracking-[0.16em] uppercase text-stone-500">
+            W{hud.levelInfo.waveInLevel}/{hud.levelInfo.wavesPerLevel}
+          </span>
+        </div>
 
         {/* Compact Tactical Motion Radar */}
         <div
@@ -292,6 +324,49 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
           </div>
           <div className="text-xl font-bold tracking-[0.18em] text-stone-100 uppercase">
             Wave {String(hud.wave).padStart(2, '0')} Cleared
+          </div>
+        </div>
+      )}
+
+      {/* Radiation Hazard Warning */}
+      {hud.radiation.active && (
+        <div className="fixed top-[30%] left-1/2 -translate-x-1/2 flex flex-col items-center gap-1.5 pointer-events-none">
+          <div className="bg-[#1a1408]/92 border border-lime-500/70 border-l-4 px-5 py-2 text-center shadow-[0_0_30px_rgba(132,204,22,0.25)]">
+            <div className="text-[10px] tracking-[0.3em] text-lime-400 uppercase font-bold">
+              ☢ Radiation Field
+            </div>
+            <div className="text-[9px] tracking-[0.2em] text-stone-400 uppercase">
+              {hud.radiation.dps.toFixed(1)} dmg/s — exit the zone
+            </div>
+          </div>
+          <div className="w-40 h-1 bg-stone-900/80 border border-stone-700 overflow-hidden">
+            <div
+              className="h-full bg-lime-400 transition-all duration-150"
+              style={{ width: `${Math.round(hud.radiation.intensity * 100)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Vehicle proximity prompt / driving cluster */}
+      {hud.vehicle.nearPrompt && !hud.vehicle.active && (
+        <div className="fixed bottom-[22%] left-1/2 -translate-x-1/2 pointer-events-none">
+          <div className="bg-[#11151d]/92 border border-stone-600 px-4 py-1.5 text-[11px] tracking-[0.2em] uppercase text-stone-100 shadow-lg">
+            <span className="text-amber-400 font-bold">E</span> — Enter {hud.vehicle.label}
+          </div>
+        </div>
+      )}
+      {hud.vehicle.active && (
+        <div className="fixed bottom-8 left-1/2 -translate-x-1/2 pointer-events-none flex flex-col items-center gap-1">
+          <div className="bg-[#11151d]/92 border border-amber-500/60 px-5 py-2 text-center shadow-lg">
+            <div className="text-[9px] tracking-[0.28em] text-stone-400 uppercase">{hud.vehicle.label}</div>
+            <div className="text-2xl font-bold tabular-nums text-amber-400 leading-none">
+              {hud.vehicle.speedKmh}
+              <span className="text-[10px] text-stone-500 ml-1">km/h</span>
+            </div>
+          </div>
+          <div className="text-[9px] tracking-[0.2em] uppercase text-stone-400">
+            WASD Drive · Space Brake · <span className="text-amber-400">E</span> Exit
           </div>
         </div>
       )}
@@ -396,6 +471,62 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
           {!hud.pointerLocked && <span className="text-amber-400">CLICK VIEW TO AIM</span>}
         </div>
       </div>
+
+      {/* Tab scoreboard — live operator standings */}
+      {showScores && hud.multiplayer.enabled && (
+        <div className="fixed inset-0 flex items-center justify-center bg-black/55 pointer-events-none">
+          <div className="w-[420px] max-w-[92vw] bg-[#0d1219]/95 border border-stone-700 border-t-2 border-t-amber-500 p-4 shadow-2xl">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <div className="text-[10px] tracking-[0.3em] text-amber-400 uppercase">Live Scoreboard</div>
+                <div className="text-[13px] font-bold tracking-[0.16em] text-stone-100 uppercase">
+                  {MATCH_MODE_SPECS[hud.multiplayer.matchMode]?.name ?? 'Co-op Squad Survival'}
+                </div>
+              </div>
+              <div className="text-right text-[9px] tracking-[0.18em] uppercase text-stone-500">
+                <div>Room {hud.multiplayer.roomCode}</div>
+                <div>{hud.multiplayer.isHost ? 'Host' : 'Operator'}</div>
+              </div>
+            </div>
+            <div className="space-y-1">
+              <div className="grid grid-cols-[2rem_1fr_3rem_3rem_4rem] gap-1 px-2 pb-1 text-[8.5px] tracking-[0.2em] uppercase text-stone-500 border-b border-stone-800">
+                <span>#</span>
+                <span>Operator</span>
+                <span className="text-right">Team</span>
+                <span className="text-right">Kills</span>
+                <span className="text-right">Deaths</span>
+              </div>
+              {hud.multiplayer.scores.map((s, idx) => (
+                <div
+                  key={s.id}
+                  className={`grid grid-cols-[2rem_1fr_3rem_3rem_4rem] gap-1 px-2 py-1 text-[11px] tracking-[0.12em] uppercase ${
+                    s.isSelf ? 'bg-amber-500/10 border border-amber-500/40' : 'border border-transparent'
+                  }`}
+                >
+                  <span className="text-stone-500 tabular-nums">{idx + 1}</span>
+                  <span className={`truncate font-bold ${s.isSelf ? 'text-amber-300' : 'text-stone-200'}`}>
+                    {s.nickname}
+                    {s.isSelf ? ' ◄' : ''}
+                  </span>
+                  <span className="text-right text-stone-400">
+                    {s.team ? (s.team === 'alpha' ? 'ALPHA' : 'BRAVO') : '—'}
+                  </span>
+                  <span className="text-right tabular-nums text-stone-100 font-bold">{s.kills}</span>
+                  <span className="text-right tabular-nums text-stone-400">{s.deaths}</span>
+                </div>
+              ))}
+              {hud.multiplayer.scores.length === 0 && (
+                <div className="px-2 py-3 text-[10px] tracking-[0.16em] uppercase text-stone-500 text-center">
+                  Waiting for squad telemetry…
+                </div>
+              )}
+            </div>
+            <div className="mt-3 pt-2 border-t border-stone-800 text-[9px] tracking-[0.2em] uppercase text-stone-500 text-center">
+              Press TAB to close
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Bottom-Right: 5-Slot Arsenal, Frag Grenade Ordnance & Diegetic Ammo Readout */}
       <div className="fixed bottom-5 right-5 flex flex-col items-end gap-2">

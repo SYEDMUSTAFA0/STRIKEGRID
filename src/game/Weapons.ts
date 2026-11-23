@@ -88,6 +88,9 @@ export class Weapons {
     shotgun: { mag: WEAPON_SPECS.shotgun.magSize, reserve: WEAPON_SPECS.shotgun.startReserve },
     marksman: { mag: WEAPON_SPECS.marksman.magSize, reserve: WEAPON_SPECS.marksman.startReserve },
     knife: { mag: 1, reserve: 0 },
+    smg: { mag: WEAPON_SPECS.smg.magSize, reserve: WEAPON_SPECS.smg.startReserve },
+    lmg: { mag: WEAPON_SPECS.lmg.magSize, reserve: WEAPON_SPECS.lmg.startReserve },
+    deagle: { mag: WEAPON_SPECS.deagle.magSize, reserve: WEAPON_SPECS.deagle.startReserve },
   };
 
   private readonly rigGroup = new THREE.Group();
@@ -96,6 +99,9 @@ export class Weapons {
   private readonly shotgunGroup = new THREE.Group();
   private readonly marksmanGroup = new THREE.Group();
   private readonly knifeGroup = new THREE.Group();
+  private readonly smgGroup = new THREE.Group();
+  private readonly lmgGroup = new THREE.Group();
+  private readonly deagleGroup = new THREE.Group();
   private readonly grenadeVmGroup = new THREE.Group();
 
   private readonly leftArmGroup = new THREE.Group();
@@ -107,19 +113,31 @@ export class Weapons {
   private rifleMagMesh!: THREE.Mesh;
   private pistolMagMesh!: THREE.Mesh;
   private marksmanMagMesh!: THREE.Mesh;
+  private smgMagMesh!: THREE.Mesh;
+  private lmgMagMesh!: THREE.Mesh;
+  private deagleMagMesh!: THREE.Mesh;
   private rifleBoltMesh!: THREE.Mesh;
   private pistolSlideMesh!: THREE.Mesh;
   private marksmanBoltMesh!: THREE.Mesh;
+  private smgBoltMesh!: THREE.Mesh;
+  private lmgBoltMesh!: THREE.Mesh;
+  private deagleSlideMesh!: THREE.Mesh;
   private shotgunPumpGroup!: THREE.Group;
 
   private rifleMuzzleAnchor = new THREE.Object3D();
   private pistolMuzzleAnchor = new THREE.Object3D();
   private shotgunMuzzleAnchor = new THREE.Object3D();
   private marksmanMuzzleAnchor = new THREE.Object3D();
+  private smgMuzzleAnchor = new THREE.Object3D();
+  private lmgMuzzleAnchor = new THREE.Object3D();
+  private deagleMuzzleAnchor = new THREE.Object3D();
   private rifleEjectAnchor = new THREE.Object3D();
   private pistolEjectAnchor = new THREE.Object3D();
   private shotgunEjectAnchor = new THREE.Object3D();
   private marksmanEjectAnchor = new THREE.Object3D();
+  private smgEjectAnchor = new THREE.Object3D();
+  private lmgEjectAnchor = new THREE.Object3D();
+  private deagleEjectAnchor = new THREE.Object3D();
 
   private receiverMat!: THREE.MeshStandardMaterial;
   private polymerMat!: THREE.MeshStandardMaterial;
@@ -179,6 +197,9 @@ export class Weapons {
     this.buildShotgunModel();
     this.buildMarksmanModel();
     this.buildKnifeModel();
+    this.buildSmgModel();
+    this.buildLmgModel();
+    this.buildDeagleModel();
     this.buildGrenadeViewModel();
     this.buildFirstPersonArms();
     this.buildShowcaseRig();
@@ -193,6 +214,9 @@ export class Weapons {
       this.shotgunGroup,
       this.marksmanGroup,
       this.knifeGroup,
+      this.smgGroup,
+      this.lmgGroup,
+      this.deagleGroup,
       this.grenadeVmGroup,
       this.leftArmGroup,
       this.rightArmGroup,
@@ -353,18 +377,40 @@ export class Weapons {
     const pistolClone = centerClone(this.pistolGroup, 1.38);
     const shotgunClone = centerClone(this.shotgunGroup, 0.8);
     const marksmanClone = centerClone(this.marksmanGroup, 0.78);
+    const smgClone = centerClone(this.smgGroup, 0.95);
+    const lmgClone = centerClone(this.lmgGroup, 0.72);
+    const deagleClone = centerClone(this.deagleGroup, 1.3);
 
     this.showcaseModels.rifle = rifleClone;
     this.showcaseModels.pistol = pistolClone;
     this.showcaseModels.shotgun = shotgunClone;
     this.showcaseModels.marksman = marksmanClone;
+    this.showcaseModels.smg = smgClone;
+    this.showcaseModels.lmg = lmgClone;
+    this.showcaseModels.deagle = deagleClone;
 
-    this.showcaseSpinGroup.add(rifleClone, pistolClone, shotgunClone, marksmanClone);
+    this.showcaseSpinGroup.add(
+      rifleClone,
+      pistolClone,
+      shotgunClone,
+      marksmanClone,
+      smgClone,
+      lmgClone,
+      deagleClone,
+    );
     this.syncShowcaseModelVisibility();
   }
 
   private syncShowcaseModelVisibility(): void {
-    for (const key of ['rifle', 'pistol', 'shotgun', 'marksman'] as const) {
+    for (const key of [
+      'rifle',
+      'pistol',
+      'shotgun',
+      'marksman',
+      'smg',
+      'lmg',
+      'deagle',
+    ] as const) {
       const m = this.showcaseModels[key];
       if (m) m.visible = key === this.showcaseWeaponId;
     }
@@ -967,6 +1013,306 @@ export class Weapons {
   }
 
   // =========================================================================
+  // 6. KR-9 VECTOR SMG (Compact receiver, suppressor, vertical foregrip, wire stock)
+  // =========================================================================
+  private buildSmgModel(): void {
+    const recvGeo = makeBeveledShapeGeo(
+      [
+        [-0.16, -0.022],
+        [0.08, -0.022],
+        [0.11, -0.034],
+        [0.12, 0.028],
+        [-0.15, 0.028],
+      ],
+      0.04,
+      0.004,
+      0.004,
+    );
+    recvGeo.rotateY(Math.PI / 2);
+    this.addMeshPart(this.smgGroup, recvGeo, this.receiverMat, 0, 0, 0);
+
+    // Short barrel + cylindrical suppressor
+    const barrelGeo = new THREE.CylinderGeometry(0.013, 0.014, 0.16, 12);
+    barrelGeo.rotateX(Math.PI / 2);
+    this.addMeshPart(this.smgGroup, barrelGeo, this.barrelMat, 0, 0.008, -0.2);
+    const supGeo = new THREE.CylinderGeometry(0.021, 0.021, 0.13, 12);
+    supGeo.rotateX(Math.PI / 2);
+    this.addMeshPart(this.smgGroup, supGeo, this.polymerMat, 0, 0.008, -0.28);
+    for (let i = 0; i < 4; i++) {
+      const ring = new THREE.TorusGeometry(0.022, 0.0035, 6, 12);
+      this.addMeshPart(this.smgGroup, ring, this.barrelMat, 0, 0.008, -0.235 - i * 0.032);
+    }
+
+    // Top rail + rear aperture sight
+    const railGeo = makeBeveledShapeGeo(
+      [
+        [-0.01, -0.004],
+        [0.01, -0.004],
+        [0.008, 0.005],
+        [-0.008, 0.005],
+      ],
+      0.22,
+      0.0015,
+      0.0015,
+    );
+    this.addMeshPart(this.smgGroup, railGeo, this.polymerMat, 0, 0.034, -0.04);
+    const sightGeo = new THREE.TorusGeometry(0.011, 0.0028, 6, 12);
+    this.addMeshPart(this.smgGroup, sightGeo, this.receiverMat, 0, 0.05, 0.02);
+
+    // Vertical foregrip + pistol grip
+    const vgripGeo = makeBeveledShapeGeo(
+      [
+        [-0.016, 0],
+        [0.016, 0],
+        [0.012, -0.07],
+        [-0.02, -0.07],
+      ],
+      0.026,
+      0.003,
+      0.003,
+    );
+    vgripGeo.rotateY(Math.PI / 2);
+    this.addMeshPart(this.smgGroup, vgripGeo, this.polymerMat, 0, -0.02, -0.13);
+
+    const gripGeo = makeBeveledShapeGeo(
+      [
+        [-0.02, 0],
+        [0.018, 0],
+        [0.026, -0.09],
+        [-0.008, -0.09],
+      ],
+      0.03,
+      0.003,
+      0.003,
+    );
+    gripGeo.rotateY(Math.PI / 2);
+    this.addMeshPart(this.smgGroup, gripGeo, this.polymerMat, 0, -0.02, 0.07);
+
+    // Wire skeleton stock
+    const wireGeo = new THREE.CylinderGeometry(0.005, 0.005, 0.16, 6);
+    wireGeo.rotateX(Math.PI / 2);
+    this.addMeshPart(this.smgGroup, wireGeo, this.barrelMat, 0, 0.004, 0.17);
+    const cheekGeo = new THREE.BoxGeometry(0.03, 0.018, 0.1);
+    this.addMeshPart(this.smgGroup, cheekGeo, this.polymerMat, 0, 0.028, 0.15);
+
+    // Curved SMG magazine
+    const magGeo = makeBeveledShapeGeo(
+      [
+        [-0.02, 0],
+        [0.02, 0],
+        [0.03, -0.11],
+        [-0.01, -0.115],
+      ],
+      0.026,
+      0.003,
+      0.003,
+    );
+    magGeo.rotateY(Math.PI / 2);
+    this.smgMagMesh = this.addMeshPart(this.smgGroup, magGeo, this.polymerMat, 0, -0.02, -0.04);
+
+    const boltGeo = makeBeveledShapeGeo(
+      [
+        [-0.02, -0.006],
+        [0.02, -0.006],
+        [0.02, 0.006],
+        [-0.02, 0.006],
+      ],
+      0.01,
+      0.002,
+      0.002,
+    );
+    boltGeo.rotateY(Math.PI / 2);
+    this.smgBoltMesh = this.addMeshPart(this.smgGroup, boltGeo, this.barrelMat, 0.02, 0.012, -0.01);
+
+    this.smgEjectAnchor.position.set(0.028, 0.012, -0.01);
+    this.smgGroup.add(this.smgEjectAnchor);
+    this.smgMuzzleAnchor.position.set(0, 0.008, -0.35);
+    this.smgGroup.add(this.smgMuzzleAnchor);
+  }
+
+  // =========================================================================
+  // 7. M249 SAW LMG (Long barrel + bipod, box magazine, top carry handle)
+  // =========================================================================
+  private buildLmgModel(): void {
+    const recvGeo = makeBeveledShapeGeo(
+      [
+        [-0.3, -0.026],
+        [0.12, -0.026],
+        [0.14, 0.03],
+        [-0.29, 0.03],
+      ],
+      0.05,
+      0.004,
+      0.004,
+    );
+    recvGeo.rotateY(Math.PI / 2);
+    this.addMeshPart(this.lmgGroup, recvGeo, this.receiverMat, 0, 0, -0.04);
+
+    // Long barrel + flash hider + bipod legs
+    const barrelGeo = new THREE.CylinderGeometry(0.015, 0.016, 0.42, 14);
+    barrelGeo.rotateX(Math.PI / 2);
+    this.addMeshPart(this.lmgGroup, barrelGeo, this.barrelMat, 0, 0.014, -0.32);
+    const hiderGeo = new THREE.CylinderGeometry(0.024, 0.024, 0.07, 10);
+    hiderGeo.rotateX(Math.PI / 2);
+    this.addMeshPart(this.lmgGroup, hiderGeo, this.polymerMat, 0, 0.014, -0.53);
+
+    for (const sx of [-1, 1]) {
+      const legGeo = new THREE.CylinderGeometry(0.006, 0.006, 0.16, 6);
+      const leg = this.addMeshPart(
+        this.lmgGroup,
+        legGeo,
+        this.barrelMat,
+        sx * 0.035,
+        0.0,
+        -0.44,
+        0,
+        0,
+        sx * 0.5,
+      );
+      leg.position.y = -0.06;
+    }
+
+    // Top carry handle
+    const handleGeo = makeBeveledShapeGeo(
+      [
+        [-0.16, -0.008],
+        [0.16, -0.008],
+        [0.16, 0.008],
+        [-0.16, 0.008],
+      ],
+      0.014,
+      0.002,
+      0.002,
+    );
+    handleGeo.rotateY(Math.PI / 2);
+    this.addMeshPart(this.lmgGroup, handleGeo, this.barrelMat, 0, 0.062, -0.02);
+    for (const hx of [-0.14, 0.14]) {
+      this.addMeshPart(
+        this.lmgGroup,
+        new THREE.BoxGeometry(0.014, 0.03, 0.014),
+        this.barrelMat,
+        hx,
+        0.045,
+        -0.02,
+      );
+    }
+
+    // Box magazine + foregrip + stock
+    const magGeo = new THREE.BoxGeometry(0.055, 0.11, 0.12);
+    this.lmgMagMesh = this.addMeshPart(this.lmgGroup, magGeo, this.polymerMat, 0, -0.09, -0.08);
+
+    const gripGeo = makeBeveledShapeGeo(
+      [
+        [-0.02, 0],
+        [0.018, 0],
+        [0.026, -0.095],
+        [-0.008, -0.095],
+      ],
+      0.032,
+      0.004,
+      0.004,
+    );
+    gripGeo.rotateY(Math.PI / 2);
+    this.addMeshPart(this.lmgGroup, gripGeo, this.polymerMat, 0, -0.022, 0.09);
+
+    const stockGeo = makeBeveledShapeGeo(
+      [
+        [-0.055, -0.05],
+        [0.055, -0.05],
+        [0.05, 0.02],
+        [-0.05, 0.02],
+      ],
+      0.04,
+      0.005,
+      0.005,
+    );
+    stockGeo.rotateY(Math.PI / 2);
+    this.addMeshPart(this.lmgGroup, stockGeo, this.polymerMat, 0, -0.014, 0.24);
+
+    const boltGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.05, 10);
+    boltGeo.rotateZ(Math.PI / 2);
+    this.lmgBoltMesh = this.addMeshPart(this.lmgGroup, boltGeo, this.barrelMat, 0.032, 0.026, -0.02);
+
+    this.lmgEjectAnchor.position.set(0.038, 0.02, -0.02);
+    this.lmgGroup.add(this.lmgEjectAnchor);
+    this.lmgMuzzleAnchor.position.set(0, 0.014, -0.57);
+    this.lmgGroup.add(this.lmgMuzzleAnchor);
+  }
+
+  // =========================================================================
+  // 8. DEAGLE .50 TAC (Oversized slide, long barrel, heavy grip)
+  // =========================================================================
+  private buildDeagleModel(): void {
+    const slideGeo = makeBeveledShapeGeo(
+      [
+        [-0.02, -0.016],
+        [0.02, -0.016],
+        [0.017, 0.02],
+        [-0.017, 0.02],
+      ],
+      0.26,
+      0.003,
+      0.003,
+    );
+    this.deagleSlideMesh = this.addMeshPart(this.deagleGroup, slideGeo, this.receiverMat, 0, 0.022, -0.03);
+
+    const frameGeo = makeBeveledShapeGeo(
+      [
+        [-0.1, -0.012],
+        [0.1, -0.012],
+        [0.1, 0.012],
+        [-0.095, 0.012],
+      ],
+      0.03,
+      0.0025,
+      0.0025,
+    );
+    frameGeo.rotateY(Math.PI / 2);
+    this.addMeshPart(this.deagleGroup, frameGeo, this.polymerMat, 0, -0.008, -0.01);
+
+    const barrelGeo = new THREE.CylinderGeometry(0.012, 0.013, 0.11, 14);
+    barrelGeo.rotateX(Math.PI / 2);
+    this.addMeshPart(this.deagleGroup, barrelGeo, this.barrelMat, 0, 0.018, -0.19);
+
+    const gripGeo = makeBeveledShapeGeo(
+      [
+        [-0.026, 0],
+        [0.026, 0],
+        [0.042, -0.12],
+        [-0.01, -0.12],
+      ],
+      0.034,
+      0.004,
+      0.004,
+    );
+    gripGeo.rotateY(Math.PI / 2);
+    this.addMeshPart(this.deagleGroup, gripGeo, this.polymerMat, 0, -0.02, 0.055);
+
+    // Serrated rear sight block
+    const sightGeo = new THREE.BoxGeometry(0.024, 0.014, 0.02);
+    this.addMeshPart(this.deagleGroup, sightGeo, this.receiverMat, 0, 0.042, 0.085);
+
+    const magGeo = makeBeveledShapeGeo(
+      [
+        [-0.016, 0],
+        [0.016, 0],
+        [0.03, -0.1],
+        [-0.004, -0.1],
+      ],
+      0.024,
+      0.002,
+      0.002,
+    );
+    magGeo.rotateY(Math.PI / 2);
+    this.deagleMagMesh = this.addMeshPart(this.deagleGroup, magGeo, this.barrelMat, 0, -0.024, 0.055);
+
+    this.deagleEjectAnchor.position.set(0.026, 0.026, -0.01);
+    this.deagleGroup.add(this.deagleEjectAnchor);
+    this.deagleMuzzleAnchor.position.set(0, 0.018, -0.25);
+    this.deagleGroup.add(this.deagleMuzzleAnchor);
+  }
+
+  // =========================================================================
   // 6. FRAG GRENADE VIEWMODEL (Lathe segmented hull + spoon + ring + LED)
   // =========================================================================
   private buildGrenadeViewModel(): void {
@@ -1236,6 +1582,9 @@ export class Weapons {
     this.pistolGroup.visible = !hideGuns && this.activeId === 'pistol';
     this.shotgunGroup.visible = !hideGuns && this.activeId === 'shotgun';
     this.marksmanGroup.visible = !hideGuns && this.activeId === 'marksman';
+    this.smgGroup.visible = !hideGuns && this.activeId === 'smg';
+    this.lmgGroup.visible = !hideGuns && this.activeId === 'lmg';
+    this.deagleGroup.visible = !hideGuns && this.activeId === 'deagle';
     this.knifeGroup.visible = !this.grenadeThrowing && showKnife;
     this.grenadeVmGroup.visible = this.grenadeThrowing;
   }
@@ -1247,6 +1596,9 @@ export class Weapons {
     this.state.shotgun = { mag: WEAPON_SPECS.shotgun.magSize, reserve: WEAPON_SPECS.shotgun.startReserve };
     this.state.marksman = { mag: WEAPON_SPECS.marksman.magSize, reserve: WEAPON_SPECS.marksman.startReserve };
     this.state.knife = { mag: 1, reserve: 0 };
+    this.state.smg = { mag: WEAPON_SPECS.smg.magSize, reserve: WEAPON_SPECS.smg.startReserve };
+    this.state.lmg = { mag: WEAPON_SPECS.lmg.magSize, reserve: WEAPON_SPECS.lmg.startReserve };
+    this.state.deagle = { mag: WEAPON_SPECS.deagle.magSize, reserve: WEAPON_SPECS.deagle.startReserve };
     this.grenades = FRAG_GRENADE_SPEC.startCount;
     this.grenadeThrowing = false;
     this.grenadeThrowTimer = 0;
@@ -1265,6 +1617,9 @@ export class Weapons {
     this.rifleBoltMesh.position.z = -0.02;
     this.pistolSlideMesh.position.z = -0.02;
     this.marksmanBoltMesh.position.z = 0.01;
+    this.smgBoltMesh.position.z = -0.01;
+    this.lmgBoltMesh.position.z = -0.02;
+    this.deagleSlideMesh.position.z = -0.03;
     this.shotgunPumpGroup.position.z = -0.26;
     this.rigGroup.position.set(0.22, -0.2, -0.44);
     this.rigGroup.rotation.set(0, 0, 0);
@@ -1282,11 +1637,17 @@ export class Weapons {
     this.pistolMagMesh.rotation.set(0, 0, 0);
     this.marksmanMagMesh.position.set(0, -0.022, -0.05);
     this.marksmanMagMesh.rotation.set(0, 0, 0);
+    this.smgMagMesh.position.set(0, -0.02, -0.04);
+    this.smgMagMesh.rotation.set(0, 0, 0);
+    this.lmgMagMesh.position.set(0, -0.09, -0.08);
+    this.lmgMagMesh.rotation.set(0, 0, 0);
+    this.deagleMagMesh.position.set(0, -0.024, 0.055);
+    this.deagleMagMesh.rotation.set(0, 0, 0);
   }
 
   private updateLeftArmPlacement(reloadDrop: number): void {
     const isKnife = this.activeId === 'knife' || this.quickMeleeActive || this.grenadeThrowing;
-    const isPistol = !isKnife && this.activeId === 'pistol';
+    const isPistol = !isKnife && (this.activeId === 'pistol' || this.activeId === 'deagle');
     const isTwoHand = !isKnife && !isPistol;
 
     this.leftTwoHandPose.visible = isTwoHand;
@@ -1317,6 +1678,18 @@ export class Weapons {
     this.state.marksman.reserve = Math.min(
       WEAPON_SPECS.marksman.maxReserve,
       this.state.marksman.reserve + Math.round(12 * amountMultiplier),
+    );
+    this.state.smg.reserve = Math.min(
+      WEAPON_SPECS.smg.maxReserve,
+      this.state.smg.reserve + Math.round(30 * amountMultiplier),
+    );
+    this.state.lmg.reserve = Math.min(
+      WEAPON_SPECS.lmg.maxReserve,
+      this.state.lmg.reserve + Math.round(60 * amountMultiplier),
+    );
+    this.state.deagle.reserve = Math.min(
+      WEAPON_SPECS.deagle.maxReserve,
+      this.state.deagle.reserve + Math.round(7 * amountMultiplier),
     );
     if (amountMultiplier >= 1 && this.grenades < this.maxGrenades) {
       this.grenades = Math.min(this.maxGrenades, this.grenades + 1);
@@ -1367,7 +1740,7 @@ export class Weapons {
       reloadJustPressed: boolean;
       meleeJustPressed: boolean;
       grenadeJustPressed: boolean;
-      switchWeapon: 1 | 2 | 3 | 4 | 5 | null;
+      switchWeapon: 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | null;
       wheelDelta: -1 | 0 | 1;
     },
     moveMetrics: { moveSpeedRatio: number; bobAmount: number; bobPhase: number },
@@ -1460,17 +1833,24 @@ export class Weapons {
     if (this.isReloading) {
       this.reloadElapsed += dt;
       const t = Math.min(1, this.reloadElapsed / spec.reloadTime);
+      const skipMagDrop = this.activeId === 'shotgun' || this.activeId === 'lmg';
       const magMesh =
         this.activeId === 'pistol'
           ? this.pistolMagMesh
           : this.activeId === 'marksman'
             ? this.marksmanMagMesh
-            : this.rifleMagMesh;
-      const baseY = -0.022;
+            : this.activeId === 'smg'
+              ? this.smgMagMesh
+              : this.activeId === 'deagle'
+                ? this.deagleMagMesh
+                : this.activeId === 'lmg'
+                  ? this.lmgMagMesh
+                  : this.rifleMagMesh;
+      const baseY = this.activeId === 'lmg' ? -0.09 : -0.022;
 
       if (t < 0.45) {
         reloadDrop = t / 0.45;
-        if (this.activeId !== 'shotgun') {
+        if (!skipMagDrop) {
           magMesh.position.y = baseY - reloadDrop * 0.24;
           magMesh.rotation.x = -reloadDrop * 0.45;
         }
@@ -1481,7 +1861,7 @@ export class Weapons {
         }
         const up = (t - 0.45) / 0.4;
         reloadDrop = 1 - up;
-        if (this.activeId !== 'shotgun') {
+        if (!skipMagDrop) {
           magMesh.position.y = baseY - reloadDrop * 0.24;
           magMesh.rotation.x = -reloadDrop * 0.45;
         }
@@ -1573,6 +1953,9 @@ export class Weapons {
     this.rifleBoltMesh.position.z = -0.02 + this.boltKick;
     this.pistolSlideMesh.position.z = -0.02 + this.boltKick;
     this.marksmanBoltMesh.position.z = 0.01 + this.boltKick;
+    this.smgBoltMesh.position.z = -0.01 + this.boltKick;
+    this.lmgBoltMesh.position.z = -0.02 + this.boltKick;
+    this.deagleSlideMesh.position.z = -0.03 + this.boltKick * 1.4;
 
     this.kickOffsetZ = THREE.MathUtils.damp(this.kickOffsetZ, 0, 16, dt);
     this.kickRotX = THREE.MathUtils.damp(this.kickRotX, 0, 16, dt);
@@ -1584,20 +1967,26 @@ export class Weapons {
       ? { x: 0.15, y: -0.1, z: -0.34 }
       : this.activeId === 'knife' || this.quickMeleeActive
         ? { x: 0.16, y: -0.11, z: -0.34 }
-        : this.activeId === 'pistol'
+        : this.activeId === 'pistol' || this.activeId === 'deagle'
           ? { x: 0.2, y: -0.17, z: -0.45 }
-          : this.activeId === 'marksman'
-            ? { x: 0.21, y: -0.175, z: -0.42 }
-            : { x: 0.21, y: -0.175, z: -0.43 };
+          : this.activeId === 'smg'
+            ? { x: 0.2, y: -0.17, z: -0.42 }
+            : this.activeId === 'marksman' || this.activeId === 'lmg'
+              ? { x: 0.21, y: -0.175, z: -0.42 }
+              : { x: 0.21, y: -0.175, z: -0.43 };
 
     const adsPos =
       this.activeId === 'pistol'
         ? { x: 0, y: -0.044, z: -0.36 }
-        : this.activeId === 'marksman'
-          ? { x: 0, y: -0.072, z: -0.28 }
-          : this.activeId === 'shotgun'
-            ? { x: 0, y: -0.046, z: -0.36 }
-            : { x: 0, y: -0.064, z: -0.35 };
+        : this.activeId === 'deagle'
+          ? { x: 0, y: -0.05, z: -0.38 }
+          : this.activeId === 'marksman'
+            ? { x: 0, y: -0.072, z: -0.28 }
+            : this.activeId === 'shotgun' || this.activeId === 'lmg'
+              ? { x: 0, y: -0.046, z: -0.36 }
+              : this.activeId === 'smg'
+                ? { x: 0, y: -0.05, z: -0.35 }
+                : { x: 0, y: -0.064, z: -0.35 };
 
     // Swing offset for Knife / Quick Melee
     let swingOffsetX = 0;
@@ -1767,6 +2156,15 @@ export class Weapons {
     if (this.activeId === 'marksman') {
       return { muzzle: this.marksmanMuzzleAnchor, eject: this.marksmanEjectAnchor };
     }
+    if (this.activeId === 'smg') {
+      return { muzzle: this.smgMuzzleAnchor, eject: this.smgEjectAnchor };
+    }
+    if (this.activeId === 'lmg') {
+      return { muzzle: this.lmgMuzzleAnchor, eject: this.lmgEjectAnchor };
+    }
+    if (this.activeId === 'deagle') {
+      return { muzzle: this.deagleMuzzleAnchor, eject: this.deagleEjectAnchor };
+    }
     return { muzzle: this.rifleMuzzleAnchor, eject: this.rifleEjectAnchor };
   }
 
@@ -1786,20 +2184,48 @@ export class Weapons {
     this.streakResetTimer = 0.34;
     player.applyRecoil(recoilStep.pitch, recoilStep.yaw);
 
-    this.kickOffsetZ = Math.min(0.14, this.kickOffsetZ + spec.kickBack);
-    this.kickRotX = Math.min(0.28, this.kickRotX + (this.activeId === 'shotgun' ? 0.17 : 0.11));
+    this.kickOffsetZ = Math.min(0.16, this.kickOffsetZ + spec.kickBack);
+    this.kickRotX = Math.min(
+      0.3,
+      this.kickRotX +
+        (this.activeId === 'shotgun'
+          ? 0.17
+          : this.activeId === 'lmg'
+            ? 0.15
+            : this.activeId === 'deagle'
+              ? 0.16
+              : 0.11),
+    );
     this.boltKick = 0.044;
-    this.heatLevel = Math.min(1, this.heatLevel + (this.activeId === 'rifle' ? 0.14 : 0.12));
+    this.heatLevel = Math.min(
+      1,
+      this.heatLevel +
+        (this.activeId === 'lmg' ? 0.22 : this.activeId === 'rifle' ? 0.14 : 0.12),
+    );
 
     const { muzzle, eject } = this.getActiveAnchors();
     muzzle.getWorldPosition(_muzzleWorld);
     this.muzzleFlashMesh.position.copy(muzzle.position);
     this.muzzleFlashMesh.rotation.z = Math.random() * Math.PI * 2;
-    const scale = (this.activeId === 'shotgun' ? 1.25 : 0.9) + Math.random() * 0.4;
+    const scale =
+      (this.activeId === 'shotgun'
+        ? 1.25
+        : this.activeId === 'lmg'
+          ? 1.45
+          : this.activeId === 'deagle'
+            ? 1.35
+            : 0.9) + Math.random() * 0.4;
     this.muzzleFlashMesh.scale.set(scale, scale, scale);
     this.muzzleFlashMesh.visible = true;
     this.muzzleLight.position.copy(muzzle.position);
-    this.muzzleLight.intensity = this.activeId === 'shotgun' ? 4.2 : 3.2;
+    this.muzzleLight.intensity =
+      this.activeId === 'shotgun'
+        ? 4.2
+        : this.activeId === 'lmg'
+          ? 5.2
+          : this.activeId === 'deagle'
+            ? 4.6
+            : 3.2;
     this.muzzleFlashTimer = 0.04;
 
     eject.getWorldPosition(_ejectWorld);

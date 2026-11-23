@@ -1,8 +1,8 @@
 import * as THREE from 'three';
-import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { ProceduralTextureLibrary } from './textures';
 import {
   FRAG_GRENADE_SPEC,
+  RADIATION_ZONES,
   getSurfaceFloorHeight,
   isPointClearOfObstacles,
   resolveCircleAABBs,
@@ -18,6 +18,20 @@ import {
   type WorldBuildContext,
 } from './vehicles';
 import type { AABB2D, GraphicsQuality, MapId, RampCollider } from './types';
+
+export interface DrivableVehicle {
+  id: number;
+  group: THREE.Group;
+  wheels: THREE.Object3D[];
+  kind: 'car' | 'bike';
+  label: string;
+  /** Local half-extents: x = width/2, z = length/2 (model forward is +Z) */
+  halfX: number;
+  halfZ: number;
+  /** Live axis-aligned collider kept in world.obstacles */
+  obstacle: AABB2D | null;
+  occupied: boolean;
+}
 
 export interface PickupItem {
   id: number;
@@ -95,6 +109,7 @@ export interface DestructibleProp {
   position: THREE.Vector3;
   hp: number;
   alive: boolean;
+  fireLight?: THREE.PointLight;
 }
 
 export interface PropDamageOutcome {
@@ -157,6 +172,14 @@ export class World {
     baseIntensity: number;
   }> = [];
   private windSocks: THREE.Object3D[] = [];
+  public readonly drivableVehicles: DrivableVehicle[] = [];
+  private radiationFx: Array<{
+    disc: THREE.Mesh;
+    ring: THREE.Mesh;
+    ringMat: THREE.MeshBasicMaterial;
+    discMat: THREE.MeshBasicMaterial;
+    phase: number;
+  }> = [];
   private patrolVehicle: {
     group: THREE.Group;
     wheels: THREE.Object3D[];
@@ -169,7 +192,7 @@ export class World {
     maxX: number;
   } | null = null;
   private atmosphericPoints: THREE.Points | null = null;
-  private particleMode: 'embers' | 'snow' | 'dust' = 'embers';
+  private particleMode: 'embers' | 'snow' | 'dust' | 'rain' = 'embers';
   private shadowQuality: GraphicsQuality = 'high';
 
   private destructibleProps: DestructibleProp[] = [];
@@ -227,12 +250,6 @@ export class World {
   ) {
     const maxAniso = renderer.capabilities.getMaxAnisotropy();
     this.texLib = new ProceduralTextureLibrary(maxAniso);
-
-    const pmrem = new THREE.PMREMGenerator(renderer);
-    const envTex = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
-    scene.environment = envTex;
-    this.sharedDisposables.push(envTex);
-    pmrem.dispose();
 
     scene.add(this.mapGroup);
 
@@ -504,12 +521,79 @@ export class World {
       this.buildArcticOutpost();
     } else if (mapId === 'desert_compound') {
       this.buildDesertCompound();
+    } else if (mapId === 'neon_docks') {
+      this.buildNeonDocks();
+    } else if (mapId === 'highland_ridge') {
+      this.buildHighlandRidge();
+    } else if (mapId === 'sunken_foundry') {
+      this.buildSunkenFoundry();
     } else {
       this.buildDuskYard();
     }
 
     this.sanitizeSpawnsAndWaypoints();
+    this.buildRadiationZones();
     this.setShadowQuality(this.shadowQuality);
+  }
+
+  private buildRadiationZones(): void {
+    const zones = RADIATION_ZONES[this.currentMapId];
+    if (!zones || zones.length === 0) return;
+    const ringGeo = new THREE.RingGeometry(0.86, 1.0, 64);
+    const discGeo = new THREE.CircleGeometry(1.0, 48);
+    const tickGeo = new THREE.PlaneGeometry(0.5, 0.12);
+    const hazardMat = new THREE.MeshBasicMaterial({
+      color: 0xa3e635,
+      transparent: true,
+      opacity: 0.85,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    const discMatBase = new THREE.MeshBasicMaterial({
+      color: 0x65a30d,
+      transparent: true,
+      opacity: 0.1,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    });
+    for (const zone of zones) {
+      const grp = new THREE.Group();
+      grp.position.set(zone.x, 0.06, zone.z);
+
+      const discMat = discMatBase.clone();
+      const disc = new THREE.Mesh(discGeo, discMat);
+      disc.rotation.x = -Math.PI / 2;
+      disc.scale.setScalar(zone.radius);
+      grp.add(disc);
+
+      const ringMat = hazardMat.clone();
+      const ring = new THREE.Mesh(ringGeo, ringMat);
+      ring.rotation.x = -Math.PI / 2;
+      ring.scale.setScalar(zone.radius);
+      grp.add(ring);
+
+      // Rotating hazard ticks just inside the rim
+      const tickMat = hazardMat.clone();
+      tickMat.opacity = 0.5;
+      for (let i = 0; i < 10; i++) {
+        const tick = new THREE.Mesh(tickGeo, tickMat);
+        const ang = (i / 10) * Math.PI * 2;
+        tick.position.set(Math.cos(ang) * zone.radius * 0.93, 0, Math.sin(ang) * zone.radius * 0.93);
+        tick.rotation.x = -Math.PI / 2;
+        tick.rotation.z = -ang;
+        grp.add(tick);
+      }
+      grp.rotation.y = Math.random() * Math.PI;
+      this.mapGroup.add(grp);
+      this.mapDisposables.push(ringGeo, discGeo, tickGeo, hazardMat, discMatBase, discMat, ringMat, tickMat);
+      this.radiationFx.push({
+        disc,
+        ring,
+        ringMat,
+        discMat,
+        phase: Math.random() * Math.PI * 2,
+      });
+    }
   }
 
   private sanitizeSpawnsAndWaypoints(): void {
@@ -550,6 +634,8 @@ export class World {
     this.windSocks.length = 0;
     this.patrolVehicle = null;
     this.atmosphericPoints = null;
+    this.drivableVehicles.length = 0;
+    this.radiationFx.length = 0;
 
     while (this.mapGroup.children.length > 0) {
       this.mapGroup.remove(this.mapGroup.children[0]);
@@ -724,7 +810,7 @@ export class World {
   }
 
   private buildAtmosphericParticles(
-    mode: 'embers' | 'snow' | 'dust',
+    mode: 'embers' | 'snow' | 'dust' | 'rain',
     count: number,
     colorHex: number,
     size: number,
@@ -914,26 +1000,85 @@ export class World {
     const ctx = this.createBuildContext();
     const isArctic = mapId === 'arctic_outpost';
     const isDesert = mapId === 'desert_compound';
+    const isNeon = mapId === 'neon_docks';
+    const isHighland = mapId === 'highland_ridge';
+    const isFoundry = mapId === 'sunken_foundry';
+    const accentHex = isArctic
+      ? 0x38bdf8
+      : isDesert
+        ? 0xf59e0b
+        : isNeon
+          ? 0x22d3ee
+          : isHighland
+            ? 0xa3e635
+            : isFoundry
+              ? 0xfb923c
+              : 0xf59e0b;
 
     // 1. LANDING AREA (South z: 21..44) — Helipad, Wind Sock, Parked Bike & Tactical SUV
     addLandingHelipad(ctx, 0, 26, mats.roofMat, mats.trimMat);
-    addTacticalMotorcycle(
+    let obsMark = this.obstacles.length;
+    const bike1 = addTacticalMotorcycle(
       ctx,
       8.0,
       28.0,
       -0.48,
-      isArctic ? 0xdbeafe : isDesert ? 0xc29b61 : 0x3b424c,
-      isArctic ? 0x38bdf8 : 0xf59e0b,
+      isArctic
+        ? 0xdbeafe
+        : isDesert
+          ? 0xc29b61
+          : isNeon
+            ? 0x1f2a3a
+            : isHighland
+              ? 0x4a5d3a
+              : isFoundry
+                ? 0x3a2a22
+                : 0x3b424c,
+      accentHex,
     );
-    addTacticalVehicle(ctx, {
+    this.drivableVehicles.push({
+      id: this.drivableVehicles.length + 1,
+      group: bike1,
+      wheels: [],
+      kind: 'bike',
+      label: 'DIRT BIKE',
+      halfX: 0.55,
+      halfZ: 1.3,
+      obstacle: this.obstacles[obsMark] ?? null,
+      occupied: false,
+    });
+    const suv1 = addTacticalVehicle(ctx, {
       x: -9.8,
       z: 29.5,
       rotY: 0.38,
       variant: 'suv',
-      bodyColorHex: isArctic ? 0x64748b : isDesert ? 0x9a7b56 : 0x2d3748,
-      accentColorHex: isArctic ? 0x38bdf8 : 0xf59e0b,
-      beaconColorHex: 0x38bdf8,
+      bodyColorHex: isArctic
+        ? 0x64748b
+        : isDesert
+          ? 0x9a7b56
+          : isNeon
+            ? 0x16222e
+            : isHighland
+              ? 0x55613f
+              : isFoundry
+                ? 0x4a3428
+                : 0x2d3748,
+      accentColorHex: accentHex,
+      beaconColorHex: isArctic ? 0x38bdf8 : accentHex,
     });
+    if (suv1.collider) {
+      this.drivableVehicles.push({
+        id: this.drivableVehicles.length + 1,
+        group: suv1.group,
+        wheels: suv1.wheels,
+        kind: 'car',
+        label: 'TACTICAL SUV',
+        halfX: 1.1,
+        halfZ: 2.2,
+        obstacle: suv1.collider,
+        occupied: false,
+      });
+    }
 
     // Live Moving Perimeter Patrol Pickup Truck on South Service Road (z = 40.5, clear of spawn & props)
     const patrol = addTacticalVehicle(ctx, {
@@ -941,9 +1086,19 @@ export class World {
       z: 40.5,
       rotY: Math.PI / 2,
       variant: 'pickup',
-      bodyColorHex: isArctic ? 0x475569 : isDesert ? 0x8c6d46 : 0x374151,
-      accentColorHex: 0xf59e0b,
-      beaconColorHex: 0xf59e0b,
+      bodyColorHex: isArctic
+        ? 0x475569
+        : isDesert
+          ? 0x8c6d46
+          : isNeon
+            ? 0x1b2836
+            : isHighland
+              ? 0x4c5a3c
+              : isFoundry
+                ? 0x40301f
+                : 0x374151,
+      accentColorHex: accentHex,
+      beaconColorHex: accentHex,
       registerStaticCollision: false,
     });
     const patrolBox: AABB2D = {
@@ -975,26 +1130,71 @@ export class World {
       roofMat: mats.roofMat,
       trimMat: mats.trimMat,
       rampMat: mats.rampMat,
-      accentColorHex: isArctic ? 0x38bdf8 : 0xf59e0b,
+      accentColorHex: isArctic ? 0x38bdf8 : isDesert ? 0xf59e0b : accentHex,
       addSlopedRamp: (cfg) => this.addSlopedRamp(cfg),
     });
-    addTacticalMotorcycle(
+    obsMark = this.obstacles.length;
+    const bike2 = addTacticalMotorcycle(
       ctx,
       -20.5,
       11.5,
       0.55,
-      isArctic ? 0x93c5fd : isDesert ? 0xb48a54 : 0x7c2d12,
+      isArctic
+        ? 0x93c5fd
+        : isDesert
+          ? 0xb48a54
+          : isNeon
+            ? 0x24384c
+            : isHighland
+              ? 0x5d7048
+              : isFoundry
+                ? 0x4e382a
+                : 0x7c2d12,
       0xf59e0b,
     );
-    addTacticalVehicle(ctx, {
+    this.drivableVehicles.push({
+      id: this.drivableVehicles.length + 1,
+      group: bike2,
+      wheels: [],
+      kind: 'bike',
+      label: 'DIRT BIKE',
+      halfX: 0.55,
+      halfZ: 1.3,
+      obstacle: this.obstacles[obsMark] ?? null,
+      occupied: false,
+    });
+    const pickup1 = addTacticalVehicle(ctx, {
       x: -31.5,
       z: 13.5,
       rotY: 0.72,
       variant: 'pickup',
-      bodyColorHex: isArctic ? 0x94a3b8 : isDesert ? 0xa3855a : 0x4b5563,
-      accentColorHex: isArctic ? 0x0ea5e9 : 0xd97706,
+      bodyColorHex: isArctic
+        ? 0x94a3b8
+        : isDesert
+          ? 0xa3855a
+          : isNeon
+            ? 0x22303f
+            : isHighland
+              ? 0x5c6b4a
+              : isFoundry
+                ? 0x4a3628
+                : 0x4b5563,
+      accentColorHex: isArctic ? 0x0ea5e9 : isDesert ? 0xd97706 : accentHex,
       beaconColorHex: 0xf59e0b,
     });
+    if (pickup1.collider) {
+      this.drivableVehicles.push({
+        id: this.drivableVehicles.length + 1,
+        group: pickup1.group,
+        wheels: pickup1.wheels,
+        kind: 'car',
+        label: 'PICKUP TRUCK',
+        halfX: 1.1,
+        halfZ: 2.2,
+        obstacle: pickup1.collider,
+        occupied: false,
+      });
+    }
 
     // 3. FOREST AREA (East x >= 17) — Dense Composite 3D Trees & Fallen Timber Undergrowth
     const barkTex = this.texLib.createBarkSet(
@@ -1062,7 +1262,7 @@ export class World {
 
     // 4. RESTRICTION AREA (North z <= -22) — Perimeter Security Fence, Gates, Signage & Patrol SUV/Bike
     addRestrictionPerimeter(ctx, -22, mats.trimMat, mats.barrierMat);
-    addTacticalVehicle(ctx, {
+    const suv2 = addTacticalVehicle(ctx, {
       x: 0,
       z: -27.2,
       rotY: Math.PI * 0.42,
@@ -1071,7 +1271,32 @@ export class World {
       accentColorHex: 0xef4444,
       beaconColorHex: 0xef4444,
     });
-    addTacticalMotorcycle(ctx, -9.5, -28.0, 2.55, 0x1f2937, 0xef4444);
+    if (suv2.collider) {
+      this.drivableVehicles.push({
+        id: this.drivableVehicles.length + 1,
+        group: suv2.group,
+        wheels: suv2.wheels,
+        kind: 'car',
+        label: 'SECURITY SUV',
+        halfX: 1.1,
+        halfZ: 2.2,
+        obstacle: suv2.collider,
+        occupied: false,
+      });
+    }
+    obsMark = this.obstacles.length;
+    const bike3 = addTacticalMotorcycle(ctx, -9.5, -28.0, 2.55, 0x1f2937, 0xef4444);
+    this.drivableVehicles.push({
+      id: this.drivableVehicles.length + 1,
+      group: bike3,
+      wheels: [],
+      kind: 'bike',
+      label: 'DIRT BIKE',
+      halfX: 0.55,
+      halfZ: 1.3,
+      obstacle: this.obstacles[obsMark] ?? null,
+      occupied: false,
+    });
   }
 
   // =========================================================================
@@ -1749,6 +1974,7 @@ export class World {
     );
   }
 
+
   private addSandstoneArchWall(
     x: number,
     z: number,
@@ -2257,7 +2483,7 @@ export class World {
       hitMesh: mesh,
       obstacle,
       position: new THREE.Vector3(x, 0.6, z),
-      hp: 34,
+      hp: 18,
       alive: true,
     });
   }
@@ -2284,6 +2510,13 @@ export class World {
     prop.obstacle.maxY = -10;
     const rIdx = this.raycastTargets.indexOf(prop.hitMesh);
     if (rIdx >= 0) this.raycastTargets.splice(rIdx, 1);
+    if (prop.fireLight) {
+      this.mapGroup.remove(prop.fireLight);
+      prop.fireLight.intensity = 0;
+      const lightIdx = this.fireLights.findIndex((fl) => fl.light === prop.fireLight);
+      if (lightIdx >= 0) this.fireLights.splice(lightIdx, 1);
+      prop.fireLight = undefined;
+    }
 
     if (prop.kind === 'crate') {
       this.spawnSparks(prop.position, _up, 16);
@@ -2390,6 +2623,9 @@ export class World {
     const embers = new THREE.Mesh(emberGeo, emberMat);
     embers.position.y = 1.12;
 
+    const propId = this.nextPropId++;
+    cyl.userData.propId = propId;
+
     group.add(cyl, b1, b2, embers);
     group.position.set(x, 0, z);
     this.mapGroup.add(group);
@@ -2401,7 +2637,949 @@ export class World {
     this.mapGroup.add(light);
     this.fireLights.push({ light, baseIntensity: 6.5, phase });
 
-    this.obstacles.push({ minX: x - 0.46, maxX: x + 0.46, minZ: z - 0.46, maxZ: z + 0.46, maxY: 1.15 });
+    const obstacle: AABB2D = { minX: x - 0.46, maxX: x + 0.46, minZ: z - 0.46, maxZ: z + 0.46, maxY: 1.15 };
+    this.obstacles.push(obstacle);
+    this.destructibleProps.push({
+      id: propId,
+      kind: 'barrel',
+      group,
+      hitMesh: cyl,
+      obstacle,
+      position: new THREE.Vector3(x, 0.6, z),
+      hp: 18,
+      alive: true,
+      fireLight: light,
+    });
+  }
+
+  // =========================================================================
+  // MAP 4: NEON DOCKS — RAIN-SLICKED NIGHT HARBOR (Crane Beacons & Container Alleys)
+  // =========================================================================
+  private buildNeonDocks(): void {
+    const horizonColor = new THREE.Color(0x070d1a);
+    this.scene.background = horizonColor;
+    this.scene.fog = new THREE.FogExp2(0x0a1424, 0.02);
+
+    this.buildSkyDome(
+      0x02060d,
+      0x0b1c33,
+      0x1d3a5e,
+      new THREE.Vector3(0.35, 0.55, -0.75),
+      [0.55, 0.72, 1.0],
+      0.5,
+    );
+    const hemi = new THREE.HemisphereLight(0x33507e, 0x05070c, 0.55);
+    this.mapGroup.add(hemi);
+    this.setupKeyLight(0x9dbdff, 0.95, [-26, 36, -20]);
+    this.addRimLight(0x22d3ee, 0.75, [30, 14, 24]);
+    this.addRimLight(0xf472b6, 0.4, [-30, 10, 20]);
+
+    this.addVolumetricBeam(-12, 9.5, -14, 0.3, -0.2, 1.5, 5.4, 19, 0x22d3ee, 0.1);
+    this.addVolumetricBeam(14, 9.5, -22, 0.3, 0.18, 1.5, 5.2, 19, 0xf472b6, 0.09);
+
+    const asphalt = this.texLib.createAsphaltSet(18);
+    const groundGeo = new THREE.PlaneGeometry(160, 160);
+    groundGeo.rotateX(-Math.PI / 2);
+    const groundMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: asphalt.map,
+      normalMap: asphalt.normalMap,
+      roughnessMap: asphalt.roughnessMap,
+      roughness: 0.34,
+      metalness: 0.55,
+    });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.receiveShadow = true;
+    this.mapGroup.add(ground);
+    this.raycastTargets.push(ground);
+    this.mapDisposables.push(groundGeo, groundMat);
+
+    // Harbor water strip along the north edge
+    const waterGeo = new THREE.PlaneGeometry(160, 26);
+    waterGeo.rotateX(-Math.PI / 2);
+    const waterMat = new THREE.MeshStandardMaterial({
+      color: 0x081826,
+      roughness: 0.12,
+      metalness: 0.9,
+    });
+    const water = new THREE.Mesh(waterGeo, waterMat);
+    water.position.set(0, 0.02, -52);
+    this.mapGroup.add(water);
+    this.mapDisposables.push(waterGeo, waterMat);
+
+    const steelMat = new THREE.MeshStandardMaterial({ color: 0x1c2430, roughness: 0.4, metalness: 0.82 });
+    const deckMat = new THREE.MeshStandardMaterial({ color: 0x2a3442, roughness: 0.5, metalness: 0.7 });
+    const neonCyan = new THREE.MeshStandardMaterial({
+      color: 0x0e7490,
+      emissive: 0x22d3ee,
+      emissiveIntensity: 2.4,
+      roughness: 0.3,
+    });
+    const neonMagenta = new THREE.MeshStandardMaterial({
+      color: 0x9d174d,
+      emissive: 0xf472b6,
+      emissiveIntensity: 2.2,
+      roughness: 0.3,
+    });
+    const neonAmber = new THREE.MeshStandardMaterial({
+      color: 0x92400e,
+      emissive: 0xfbbf24,
+      emissiveIntensity: 2.0,
+      roughness: 0.3,
+    });
+    const crateTex = this.texLib.createMetalCrateSet();
+    const crateMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: crateTex.map,
+      normalMap: crateTex.normalMap,
+      roughnessMap: crateTex.roughnessMap,
+      roughness: 0.62,
+      metalness: 0.5,
+    });
+    this.mapDisposables.push(steelMat, deckMat, neonCyan, neonMagenta, neonAmber, crateMat);
+
+    // Illuminated shipping cranes
+    this.buildGantryCrane(0, -30, steelMat);
+    this.buildGantryCrane(-24, -6, steelMat);
+
+    // Container alleyways — tight north-south lanes
+    const containerMats = [
+      this.makeContainerMaterial([16, 42, 66], 401),
+      this.makeContainerMaterial([52, 20, 58], 402),
+      this.makeContainerMaterial([24, 58, 48], 403),
+      this.makeContainerMaterial([64, 44, 20], 404),
+    ];
+    const containers = [
+      { x: -9, y: 0, z: 6, rotY: 0, matIdx: 0 },
+      { x: -9, y: 0, z: -2, rotY: 0, matIdx: 2 },
+      { x: -9, y: 0, z: -10, rotY: Math.PI / 2, matIdx: 1 },
+      { x: -9, y: 2.9, z: -6, rotY: 0.03, matIdx: 3 },
+      { x: 9, y: 0, z: 8, rotY: 0, matIdx: 1 },
+      { x: 9, y: 0, z: 0, rotY: 0, matIdx: 3 },
+      { x: 9, y: 0, z: -8, rotY: Math.PI / 2, matIdx: 0 },
+      { x: 9, y: 2.9, z: -4, rotY: -0.04, matIdx: 2 },
+      { x: -20, y: 0, z: -16, rotY: Math.PI / 2, matIdx: 2 },
+      { x: -14, y: 0, z: -16, rotY: Math.PI / 2, matIdx: 0 },
+      { x: 20, y: 0, z: -14, rotY: Math.PI / 2, matIdx: 3 },
+      { x: 26, y: 0, z: -14, rotY: Math.PI / 2, matIdx: 1 },
+      { x: -26, y: 0, z: 14, rotY: 0, matIdx: 1 },
+      { x: 26, y: 0, z: 16, rotY: 0, matIdx: 0 },
+    ];
+    for (const c of containers) {
+      this.addShippingContainer(c.x, c.y, c.z, c.rotY, containerMats[c.matIdx], steelMat);
+    }
+
+    // Neon edge strips marking the alley lanes & dock edge
+    const strips: Array<[number, number, number, number, number, THREE.Material]> = [
+      [-6.4, 0.06, 2, 24, 0.12, neonCyan],
+      [6.4, 0.06, 2, 24, 0.12, neonMagenta],
+      [-15, 0.06, -14, 0.14, 18, neonAmber],
+      [23, 0.06, 0, 0.14, 22, neonCyan],
+      [0, 0.06, -38, 30, 0.14, neonAmber],
+    ];
+    const stripGeoCache = new Map<string, THREE.BoxGeometry>();
+    for (const [x, y, z, w, d, mat] of strips) {
+      const key = `${w.toFixed(1)}x${d.toFixed(1)}`;
+      let geo = stripGeoCache.get(key);
+      if (!geo) {
+        geo = new THREE.BoxGeometry(w, 0.1, d);
+        this.mapDisposables.push(geo);
+        stripGeoCache.set(key, geo);
+      }
+      const strip = new THREE.Mesh(geo, mat);
+      strip.position.set(x, y, z);
+      this.mapGroup.add(strip);
+    }
+
+    // Docked patrol boats along the waterline
+    const boatMat = new THREE.MeshStandardMaterial({ color: 0x22384e, roughness: 0.45, metalness: 0.7 });
+    const boatDeckMat = new THREE.MeshStandardMaterial({
+      color: 0x2e4a66,
+      emissive: 0x0e7490,
+      emissiveIntensity: 0.5,
+      roughness: 0.4,
+      metalness: 0.6,
+    });
+    this.mapDisposables.push(boatMat, boatDeckMat);
+    this.addPatrolBoat(-24, -38, 0.15, boatMat, boatDeckMat);
+    this.addPatrolBoat(18, -40, -0.1, boatMat, boatDeckMat);
+    this.addPatrolBoat(34, -20, Math.PI / 2, boatMat, boatDeckMat);
+
+    // Elevated container catwalk with neon-lit access ramp
+    this.addStaticBox(14.4, 2.85, -12, 3.0, 0.3, 5.2, deckMat, true);
+    this.addStaticBox(15.8, 1.4, -10.4, 0.26, 2.8, 0.26, steelMat, true);
+    this.addStaticBox(15.8, 1.4, -13.6, 0.26, 2.8, 0.26, steelMat, true);
+    this.addSlopedRamp({
+      centerX: 14.4,
+      centerZ: -6.4,
+      width: 2.4,
+      length: 8.4,
+      lowY: 0,
+      highY: 2.9,
+      axis: 'z',
+      dir: -1,
+      mat: deckMat,
+      railMat: neonCyan,
+      withRails: true,
+    });
+
+    const barriers = [
+      { x: -4, z: 18, rotY: 0.1 },
+      { x: 4, z: 18, rotY: -0.1 },
+      { x: 0, z: 8, rotY: 0 },
+      { x: -16, z: -2, rotY: Math.PI / 2 },
+      { x: 16, z: -2, rotY: Math.PI / 2 },
+      { x: -8, z: -24, rotY: 0.4 },
+      { x: 10, z: -26, rotY: -0.3 },
+    ];
+    for (const b of barriers) {
+      this.addConcreteBarrier(b.x, b.z, b.rotY, deckMat);
+    }
+
+    const crateClusters = [
+      { x: -5, z: 12, stacked: true },
+      { x: 5.4, z: 13, stacked: false },
+      { x: -14, z: -20, stacked: true },
+      { x: 16, z: -18, stacked: false },
+      { x: 0, z: -30, stacked: true },
+    ];
+    for (const cl of crateClusters) {
+      this.addCrateCluster(cl.x, cl.z, cl.stacked, crateMat, steelMat);
+    }
+
+    this.addIndustrialLamp(-18, 20, Math.PI * 0.25, steelMat, 0x22d3ee, true);
+    this.addIndustrialLamp(18, 20, -Math.PI * 0.25, steelMat, 0xf472b6, false);
+    this.addIndustrialLamp(0, -18, 0, steelMat, 0xfbbf24, true);
+
+    this.addHazardBarrel(-7, 16, 0);
+    this.addHazardBarrel(8, -6, 1.7);
+    this.addHazardBarrel(-18, -22, 3.4);
+
+    this.addDestructibleWoodCrate(-10, 14);
+    this.addDestructibleWoodCrate(11, 12);
+    this.addDestructibleWoodCrate(24, -10);
+    this.addDestructibleWoodCrate(-24, 6);
+    this.addExplosiveBarrel(-3, 4);
+    this.addExplosiveBarrel(14, -14);
+    this.addExplosiveBarrel(-12, -28);
+
+    this.buildSharedZonesAndVehicles('neon_docks', {
+      wallMat: deckMat,
+      roofMat: deckMat,
+      trimMat: steelMat,
+      rampMat: deckMat,
+      barrierMat: deckMat,
+    });
+
+    this.buildPerimeterWalls(steelMat, steelMat);
+    this.buildDistantSkyline(0x0a101d);
+    this.buildAtmosphericParticles('rain', 520, 0x8fb8e8, 0.055, 0.42);
+
+    this.waypoints.push(
+      new THREE.Vector3(0, 0, 14),
+      new THREE.Vector3(-9, 0, 2),
+      new THREE.Vector3(9, 0, 4),
+      new THREE.Vector3(0, 0, -8),
+      new THREE.Vector3(-18, 0, -14),
+      new THREE.Vector3(20, 0, -10),
+      new THREE.Vector3(-14, 0, -24),
+      new THREE.Vector3(16, 0, -22),
+      new THREE.Vector3(0, 0, -32),
+      new THREE.Vector3(-24, 0, 10),
+      new THREE.Vector3(24, 0, 12),
+    );
+    this.spawnPoints.push(
+      new THREE.Vector3(-14, 0, -24),
+      new THREE.Vector3(14, 0, -24),
+      new THREE.Vector3(0, 0, -30),
+      new THREE.Vector3(-22, 0, -6),
+      new THREE.Vector3(22, 0, -8),
+      new THREE.Vector3(-20, 0, 14),
+      new THREE.Vector3(20, 0, 16),
+      new THREE.Vector3(-6, 0, -34),
+      new THREE.Vector3(8, 0, -34),
+    );
+  }
+
+  // =========================================================================
+  // MAP 5: HIGHLAND RIDGE — GOLDEN-HOUR RELAY OUTPOST (Towers, Dishes & Pines)
+  // =========================================================================
+  private buildHighlandRidge(): void {
+    const horizonColor = new THREE.Color(0xd9a86a);
+    this.scene.background = horizonColor;
+    this.scene.fog = new THREE.FogExp2(0xc99a63, 0.0085);
+
+    this.buildSkyDome(
+      0x2e4a7a,
+      0xc98d54,
+      0xf2c078,
+      new THREE.Vector3(0.5, 0.16, -0.8),
+      [1.0, 0.72, 0.4],
+      0.6,
+    );
+    const hemi = new THREE.HemisphereLight(0xd8b98a, 0x44523c, 0.6);
+    this.mapGroup.add(hemi);
+    this.setupKeyLight(0xffd9a0, 1.6, [30, 18, -28]);
+    this.addRimLight(0x7dd3fc, 0.5, [-32, 20, 26]);
+
+    const sand = this.texLib.createDesertSandSet(18);
+    const groundGeo = new THREE.PlaneGeometry(160, 160);
+    groundGeo.rotateX(-Math.PI / 2);
+    const groundMat = new THREE.MeshStandardMaterial({
+      color: 0x9aa06a,
+      map: sand.map,
+      normalMap: sand.normalMap,
+      roughnessMap: sand.roughnessMap,
+      roughness: 0.9,
+      metalness: 0.04,
+    });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.receiveShadow = true;
+    this.mapGroup.add(ground);
+    this.raycastTargets.push(ground);
+    this.mapDisposables.push(groundGeo, groundMat);
+
+    const rockMat = new THREE.MeshStandardMaterial({
+      color: 0x7d7468,
+      roughness: 0.92,
+      metalness: 0.06,
+      flatShading: true,
+    });
+    const pineMat = new THREE.MeshStandardMaterial({
+      color: 0x2f5233,
+      roughness: 0.88,
+      metalness: 0.03,
+      flatShading: true,
+    });
+    const steelMat = new THREE.MeshStandardMaterial({ color: 0x4a4438, roughness: 0.55, metalness: 0.6 });
+    const woodMat = new THREE.MeshStandardMaterial({ color: 0x5d4a33, roughness: 0.85, metalness: 0.05 });
+    const crateTex = this.texLib.createMetalCrateSet();
+    const crateMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: crateTex.map,
+      normalMap: crateTex.normalMap,
+      roughnessMap: crateTex.roughnessMap,
+      roughness: 0.7,
+      metalness: 0.3,
+    });
+    this.mapDisposables.push(rockMat, pineMat, steelMat, woodMat, crateMat);
+
+    // Rocky ridges & pine clusters framing the lanes
+    const rocks: Array<[number, number, number]> = [
+      [-30, -20, 3.4], [-34, 4, 2.6], [-26, 22, 3.0], [-12, -32, 2.4],
+      [30, -18, 3.2], [34, 6, 2.4], [26, 24, 3.0], [12, -30, 2.2],
+      [-18, 34, 2.8], [18, 34, 3.4], [0, 40, 2.6],
+    ];
+    for (const [x, z, s] of rocks) {
+      this.addRockOutcrop(x, z, s, rockMat);
+    }
+    const pines: Array<[number, number, number]> = [
+      [-22, -28, 1.2], [-28, -10, 1.0], [-20, 8, 1.15], [-14, 26, 0.95],
+      [22, -26, 1.25], [28, -8, 1.0], [20, 10, 1.1], [14, 28, 0.9],
+      [-8, -36, 1.0], [8, -38, 1.1], [-32, 16, 0.9], [32, 18, 1.0],
+    ];
+    for (const [x, z, s] of pines) {
+      this.addPineTree(x, z, s, pineMat, woodMat);
+    }
+
+    // Elevated watchtowers with radar dishes overlooking mid lanes
+    this.addWatchtower(-22, -14, steelMat, woodMat, rockMat);
+    this.addWatchtower(22, -16, steelMat, woodMat, rockMat);
+    this.addWatchtower(0, -36, steelMat, woodMat, rockMat);
+
+    // Supply depots & fuel drums
+    const crateClusters = [
+      { x: -8, z: 14, stacked: true },
+      { x: 9, z: 15, stacked: false },
+      { x: -16, z: -2, stacked: true },
+      { x: 16, z: -4, stacked: false },
+      { x: -6, z: -24, stacked: true },
+      { x: 8, z: -26, stacked: false },
+    ];
+    for (const cl of crateClusters) {
+      this.addCrateCluster(cl.x, cl.z, cl.stacked, crateMat, steelMat);
+    }
+    const barriers = [
+      { x: -4, z: 18, rotY: 0.12 },
+      { x: 4, z: 18, rotY: -0.12 },
+      { x: 0, z: 8, rotY: 0 },
+      { x: -14, z: -18, rotY: Math.PI / 2 },
+      { x: 14, z: -18, rotY: Math.PI / 2 },
+      { x: -10, z: -32, rotY: 0.3 },
+      { x: 10, z: -32, rotY: -0.3 },
+    ];
+    for (const b of barriers) {
+      this.addConcreteBarrier(b.x, b.z, b.rotY, rockMat);
+    }
+
+    this.addIndustrialLamp(-18, 22, Math.PI * 0.25, steelMat, 0xffd9a0, true);
+    this.addIndustrialLamp(18, 22, -Math.PI * 0.25, steelMat, 0xffd9a0, false);
+    this.addHazardBarrel(-7, 17, 0);
+    this.addHazardBarrel(8, -8, 1.7);
+    this.addHazardBarrel(-18, -28, 3.4);
+    this.addDestructibleWoodCrate(-12, 16);
+    this.addDestructibleWoodCrate(13, 14);
+    this.addDestructibleWoodCrate(26, -16);
+    this.addDestructibleWoodCrate(-26, -4);
+    this.addExplosiveBarrel(-3, 2);
+    this.addExplosiveBarrel(12, -12);
+    this.addExplosiveBarrel(0, -30);
+
+    // Distant mountain silhouettes ringing the horizon
+    this.addMountainRing(rockMat);
+
+    this.buildSharedZonesAndVehicles('highland_ridge', {
+      wallMat: rockMat,
+      roofMat: steelMat,
+      trimMat: steelMat,
+      rampMat: steelMat,
+      barrierMat: rockMat,
+    });
+
+    this.buildPerimeterWalls(rockMat, steelMat);
+    this.buildAtmosphericParticles('dust', 170, 0xffd9a0, 0.09, 0.4);
+
+    this.waypoints.push(
+      new THREE.Vector3(0, 0, 14),
+      new THREE.Vector3(-10, 0, 6),
+      new THREE.Vector3(10, 0, 6),
+      new THREE.Vector3(0, 0, -6),
+      new THREE.Vector3(-20, 0, -12),
+      new THREE.Vector3(20, 0, -14),
+      new THREE.Vector3(-14, 0, -26),
+      new THREE.Vector3(14, 0, -26),
+      new THREE.Vector3(0, 0, -34),
+      new THREE.Vector3(-26, 0, 6),
+      new THREE.Vector3(26, 0, 8),
+    );
+    this.spawnPoints.push(
+      new THREE.Vector3(-16, 0, -26),
+      new THREE.Vector3(16, 0, -26),
+      new THREE.Vector3(0, 0, -32),
+      new THREE.Vector3(-22, 0, -4),
+      new THREE.Vector3(22, 0, -6),
+      new THREE.Vector3(-24, 0, 14),
+      new THREE.Vector3(24, 0, 16),
+      new THREE.Vector3(-8, 0, -38),
+      new THREE.Vector3(8, 0, -38),
+    );
+  }
+
+  // =========================================================================
+  // MAP 6: SUNKEN FOUNDRY — MOLTEN WORKS (Catwalks, Vats & Furnace Glow)
+  // =========================================================================
+  private buildSunkenFoundry(): void {
+    const horizonColor = new THREE.Color(0x160c06);
+    this.scene.background = horizonColor;
+    this.scene.fog = new THREE.FogExp2(0x1c0f07, 0.022);
+
+    this.buildSkyDome(
+      0x080402,
+      0x241108,
+      0x8a3a12,
+      new THREE.Vector3(0.1, 0.12, -0.9),
+      [1.0, 0.55, 0.2],
+      0.8,
+    );
+    const hemi = new THREE.HemisphereLight(0x8a4a26, 0x140b06, 0.5);
+    this.mapGroup.add(hemi);
+    this.setupKeyLight(0x9db4ff, 0.55, [-20, 42, -18]);
+    this.addRimLight(0xfb923c, 0.8, [28, 10, 24]);
+
+    const concrete = this.texLib.createConcreteSet(6, 3);
+    const groundGeo = new THREE.PlaneGeometry(160, 160);
+    groundGeo.rotateX(-Math.PI / 2);
+    const groundMat = new THREE.MeshStandardMaterial({
+      color: 0x6b5a4c,
+      map: concrete.map,
+      normalMap: concrete.normalMap,
+      roughnessMap: concrete.roughnessMap,
+      roughness: 0.55,
+      metalness: 0.45,
+    });
+    const ground = new THREE.Mesh(groundGeo, groundMat);
+    ground.receiveShadow = true;
+    this.mapGroup.add(ground);
+    this.raycastTargets.push(ground);
+    this.mapDisposables.push(groundGeo, groundMat);
+
+    // Molten cracks — emissive seams scattered across the floor
+    const crackMat = new THREE.MeshStandardMaterial({
+      color: 0x431407,
+      emissive: 0xff5a00,
+      emissiveIntensity: 2.2,
+      roughness: 0.6,
+      metalness: 0.2,
+    });
+    const crackGeo = new THREE.PlaneGeometry(1, 1);
+    crackGeo.rotateX(-Math.PI / 2);
+    this.mapDisposables.push(crackMat, crackGeo);
+    for (const [x, z, sx, sz] of [
+      [-6, 6, 6, 0.4], [7, 2, 8, 0.35], [-12, -14, 5, 0.5],
+      [12, -18, 6, 0.4], [0, -26, 7, 0.45], [-18, 18, 4, 0.4],
+      [20, 8, 5, 0.35],
+    ] as Array<[number, number, number, number]>) {
+      const crack = new THREE.Mesh(crackGeo, crackMat);
+      crack.position.set(x, 0.03, z);
+      crack.scale.set(sx, 1, sz);
+      crack.rotation.y = (x + z) * 0.7;
+      this.mapGroup.add(crack);
+    }
+
+    const ironMat = new THREE.MeshStandardMaterial({ color: 0x3a3230, roughness: 0.5, metalness: 0.75 });
+    const rustMat = new THREE.MeshStandardMaterial({ color: 0x6e3b1e, roughness: 0.8, metalness: 0.35 });
+    const deckMat = new THREE.MeshStandardMaterial({ color: 0x4a423c, roughness: 0.55, metalness: 0.7 });
+    const glowMat = new THREE.MeshStandardMaterial({
+      color: 0xff6a00,
+      emissive: 0xff4400,
+      emissiveIntensity: 3.0,
+      roughness: 0.4,
+    });
+    const crateTex = this.texLib.createMetalCrateSet();
+    const crateMat = new THREE.MeshStandardMaterial({
+      color: 0xffffff,
+      map: crateTex.map,
+      normalMap: crateTex.normalMap,
+      roughnessMap: crateTex.roughnessMap,
+      roughness: 0.7,
+      metalness: 0.4,
+    });
+    this.mapDisposables.push(ironMat, rustMat, deckMat, glowMat, crateMat);
+
+    // Furnace stacks with flickering glow — the map's light anchors
+    this.addFurnaceStack(-16, -30, ironMat, rustMat, glowMat);
+    this.addFurnaceStack(16, -30, ironMat, rustMat, glowMat);
+    this.addFurnaceStack(-28, 6, ironMat, rustMat, glowMat);
+    this.addFurnaceStack(28, 6, ironMat, rustMat, glowMat);
+
+    // Cooling vats — glowing molten tops
+    this.addMoltenVat(-8, -16, ironMat, glowMat);
+    this.addMoltenVat(8, -16, ironMat, glowMat);
+    this.addMoltenVat(-8, 20, ironMat, glowMat);
+    this.addMoltenVat(8, 20, ironMat, glowMat);
+
+    // Elevated catwalk bridges crossing the central lanes
+    this.addCatwalkSpan(-18, -4, 18, -4, deckMat, ironMat);
+    this.addCatwalkSpan(-18, -22, 18, -22, deckMat, ironMat);
+
+    // Heavy machinery blocks
+    const machineGeo = new THREE.BoxGeometry(3.4, 2.4, 2.2);
+    const pressGeo = new THREE.CylinderGeometry(1.1, 1.4, 3.2, 10);
+    this.mapDisposables.push(machineGeo, pressGeo);
+    for (const [x, z, rot] of [[-14, 8, 0.3], [14, 10, -0.4], [-24, -16, 1.1], [24, -14, -0.9]] as Array<[number, number, number]>) {
+      const isPress = Math.abs(rot) > 0.7;
+      const m = new THREE.Mesh(isPress ? pressGeo : machineGeo, isPress ? rustMat : ironMat);
+      m.position.set(x, isPress ? 1.6 : 1.2, z);
+      m.rotation.y = rot;
+      m.castShadow = true;
+      m.receiveShadow = true;
+      this.mapGroup.add(m);
+      this.raycastTargets.push(m);
+      const r = isPress ? 1.5 : 1.9;
+      this.obstacles.push({ minX: x - r, maxX: x + r, minZ: z - r, maxZ: z + r, maxY: 3.4 });
+    }
+
+    const crateClusters = [
+      { x: -4, z: 10, stacked: true },
+      { x: 5, z: 11, stacked: false },
+      { x: -13, z: -8, stacked: false },
+      { x: 13, z: -8, stacked: true },
+      { x: 0, z: -32, stacked: true },
+    ];
+    for (const cl of crateClusters) {
+      this.addCrateCluster(cl.x, cl.z, cl.stacked, crateMat, ironMat);
+    }
+    const barriers = [
+      { x: -4, z: 20, rotY: 0.1 },
+      { x: 4, z: 20, rotY: -0.1 },
+      { x: 0, z: 6, rotY: 0 },
+      { x: -12, z: 0, rotY: Math.PI / 2 },
+      { x: 12, z: 0, rotY: Math.PI / 2 },
+    ];
+    for (const b of barriers) {
+      this.addConcreteBarrier(b.x, b.z, b.rotY, ironMat);
+    }
+
+    this.addIndustrialLamp(-18, 24, Math.PI * 0.25, ironMat, 0xffb36b, true);
+    this.addIndustrialLamp(18, 24, -Math.PI * 0.25, ironMat, 0xffb36b, false);
+    this.addHazardBarrel(-7, 18, 0);
+    this.addHazardBarrel(8, -4, 1.7);
+    this.addHazardBarrel(-18, -24, 3.4);
+    this.addDestructibleWoodCrate(-10, 18);
+    this.addDestructibleWoodCrate(11, 16);
+    this.addDestructibleWoodCrate(22, -10);
+    this.addDestructibleWoodCrate(-22, -6);
+    this.addExplosiveBarrel(-3, 0);
+    this.addExplosiveBarrel(14, -20);
+    this.addExplosiveBarrel(-14, -34);
+
+    this.buildSharedZonesAndVehicles('sunken_foundry', {
+      wallMat: ironMat,
+      roofMat: deckMat,
+      trimMat: ironMat,
+      rampMat: deckMat,
+      barrierMat: ironMat,
+    });
+
+    this.buildPerimeterWalls(ironMat, ironMat);
+    this.buildAtmosphericParticles('embers', 220, 0xff8a3a, 0.11, 0.5);
+
+    this.waypoints.push(
+      new THREE.Vector3(0, 0, 14),
+      new THREE.Vector3(-8, 0, 6),
+      new THREE.Vector3(8, 0, 6),
+      new THREE.Vector3(0, 0, -2),
+      new THREE.Vector3(-14, 0, -12),
+      new THREE.Vector3(14, 0, -12),
+      new THREE.Vector3(-10, 0, -24),
+      new THREE.Vector3(10, 0, -24),
+      new THREE.Vector3(0, 0, -32),
+      new THREE.Vector3(-20, 0, 10),
+      new THREE.Vector3(20, 0, 12),
+    );
+    this.spawnPoints.push(
+      new THREE.Vector3(-14, 0, -24),
+      new THREE.Vector3(14, 0, -24),
+      new THREE.Vector3(0, 0, -30),
+      new THREE.Vector3(-20, 0, -2),
+      new THREE.Vector3(20, 0, -4),
+      new THREE.Vector3(-18, 0, 16),
+      new THREE.Vector3(18, 0, 18),
+      new THREE.Vector3(-6, 0, -36),
+      new THREE.Vector3(6, 0, -36),
+    );
+  }
+
+  // =========================================================================
+  // MAP-SPECIFIC PROP HELPERS
+  // =========================================================================
+  private addPatrolBoat(
+    x: number,
+    z: number,
+    rotY: number,
+    hullMat: THREE.MeshStandardMaterial,
+    deckGlowMat: THREE.MeshStandardMaterial,
+  ): void {
+    const group = new THREE.Group();
+    const hullGeo = new THREE.BoxGeometry(2.4, 1.1, 7.5);
+    const bowGeo = new THREE.ConeGeometry(1.2, 2.2, 4);
+    bowGeo.rotateX(Math.PI / 2);
+    bowGeo.rotateY(Math.PI / 4);
+    const cabinGeo = new THREE.BoxGeometry(1.6, 1.2, 2.2);
+    const mastGeo = new THREE.CylinderGeometry(0.06, 0.09, 2.4, 6);
+    const stripeGeo = new THREE.BoxGeometry(2.5, 0.16, 7.4);
+
+    const hull = new THREE.Mesh(hullGeo, hullMat);
+    hull.position.y = 0.55;
+    hull.castShadow = true;
+    hull.receiveShadow = true;
+    const bow = new THREE.Mesh(bowGeo, hullMat);
+    bow.position.set(0, 0.55, 4.7);
+    const cabin = new THREE.Mesh(cabinGeo, hullMat);
+    cabin.position.set(0, 1.6, -0.6);
+    cabin.castShadow = true;
+    const mast = new THREE.Mesh(mastGeo, hullMat);
+    mast.position.set(0, 2.6, -1.6);
+    const stripe = new THREE.Mesh(stripeGeo, deckGlowMat);
+    stripe.position.y = 1.1;
+
+    group.add(hull, bow, cabin, mast, stripe);
+    group.position.set(x, 0.35, z);
+    group.rotation.y = rotY;
+    group.rotation.z = 0.02;
+    this.mapGroup.add(group);
+    this.raycastTargets.push(hull, cabin);
+    this.mapDisposables.push(hullGeo, bowGeo, cabinGeo, mastGeo, stripeGeo);
+
+    this.obstacles.push({
+      minX: x - 1.5,
+      maxX: x + 1.5,
+      minZ: z - 4.2,
+      maxZ: z + 4.2,
+      maxY: 2.4,
+    });
+  }
+
+  private addWatchtower(
+    x: number,
+    z: number,
+    steelMat: THREE.Material,
+    woodMat: THREE.Material,
+    rockMat: THREE.Material,
+  ): void {
+    const group = new THREE.Group();
+    const legGeo = new THREE.BoxGeometry(0.22, 3.6, 0.22);
+    const deckGeo = new THREE.BoxGeometry(4.2, 0.3, 4.2);
+    const railGeo = new THREE.BoxGeometry(4.2, 0.7, 0.12);
+    const roofGeo = new THREE.BoxGeometry(4.6, 0.18, 4.6);
+    const roofPostGeo = new THREE.BoxGeometry(0.14, 1.6, 0.14);
+
+    for (const [lx, lz] of [[-1.7, -1.7], [1.7, -1.7], [-1.7, 1.7], [1.7, 1.7]] as Array<[number, number]>) {
+      const leg = new THREE.Mesh(legGeo, steelMat);
+      leg.position.set(lx, 1.8, lz);
+      leg.castShadow = true;
+      group.add(leg);
+    }
+    const deck = new THREE.Mesh(deckGeo, woodMat);
+    deck.position.y = 3.65;
+    deck.castShadow = true;
+    deck.receiveShadow = true;
+    group.add(deck);
+    for (const [rx, rz, ry] of [[0, -2.05, 0], [0, 2.05, 0], [-2.05, 0, Math.PI / 2], [2.05, 0, Math.PI / 2]] as Array<[number, number, number]>) {
+      const rail = new THREE.Mesh(railGeo, steelMat);
+      rail.position.set(rx, 4.2, rz);
+      rail.rotation.y = ry;
+      group.add(rail);
+    }
+    for (const [px, pz] of [[-1.9, -1.9], [1.9, -1.9], [-1.9, 1.9], [1.9, 1.9]] as Array<[number, number]>) {
+      const post = new THREE.Mesh(roofPostGeo, steelMat);
+      post.position.set(px, 4.9, pz);
+      group.add(post);
+    }
+    const roof = new THREE.Mesh(roofGeo, rockMat);
+    roof.position.y = 5.75;
+    roof.castShadow = true;
+    group.add(roof);
+
+    // Radar dish on the roof
+    const dishGeo = new THREE.SphereGeometry(0.9, 12, 8, 0, Math.PI * 2, 0, Math.PI / 2.6);
+    const dish = new THREE.Mesh(dishGeo, steelMat);
+    dish.position.y = 6.1;
+    dish.rotation.x = Math.PI / 2.4;
+    group.add(dish);
+
+    group.position.set(x, 0, z);
+    this.mapGroup.add(group);
+    this.raycastTargets.push(deck, roof);
+    this.mapDisposables.push(legGeo, deckGeo, railGeo, roofGeo, roofPostGeo, dishGeo);
+
+    this.obstacles.push({ minX: x - 2.1, maxX: x + 2.1, minZ: z - 2.1, maxZ: z + 2.1, minY: 0, maxY: 3.8 });
+
+    // Access ramp up to the deck
+    this.addSlopedRamp({
+      centerX: x + 3.4,
+      centerZ: z,
+      width: 1.8,
+      length: 5.6,
+      lowY: 0,
+      highY: 3.6,
+      axis: 'x',
+      dir: -1,
+      mat: woodMat,
+      railMat: steelMat,
+      withRails: true,
+    });
+  }
+
+  private addRadarDish(x: number, y: number, z: number, mat: THREE.Material): void {
+    const group = new THREE.Group();
+    const poleGeo = new THREE.CylinderGeometry(0.09, 0.13, 3.4, 8);
+    const dishGeo = new THREE.SphereGeometry(1.0, 14, 10, 0, Math.PI * 2, 0, Math.PI / 2.4);
+    const pole = new THREE.Mesh(poleGeo, mat);
+    pole.position.y = 1.7;
+    pole.castShadow = true;
+    const dish = new THREE.Mesh(dishGeo, mat);
+    dish.position.y = 3.4;
+    dish.rotation.x = Math.PI / 2.2;
+    dish.castShadow = true;
+    group.add(pole, dish);
+    group.position.set(x, y, z);
+    this.mapGroup.add(group);
+    this.mapDisposables.push(poleGeo, dishGeo);
+    this.obstacles.push({ minX: x - 0.3, maxX: x + 0.3, minZ: z - 0.3, maxZ: z + 0.3, maxY: 3.6 });
+  }
+
+  private addRockOutcrop(x: number, z: number, scale: number, mat: THREE.Material): void {
+    const geo = new THREE.IcosahedronGeometry(scale, 0);
+    const rock = new THREE.Mesh(geo, mat);
+    rock.position.set(x, scale * 0.42, z);
+    rock.rotation.set(Math.random() * 0.6, Math.random() * Math.PI, Math.random() * 0.6);
+    rock.scale.y = 0.72;
+    rock.castShadow = true;
+    rock.receiveShadow = true;
+    this.mapGroup.add(rock);
+    this.raycastTargets.push(rock);
+    this.mapDisposables.push(geo);
+    const r = scale * 0.85;
+    this.obstacles.push({ minX: x - r, maxX: x + r, minZ: z - r, maxZ: z + r, maxY: scale * 1.1 });
+  }
+
+  private addPineTree(x: number, z: number, scale: number, foliageMat: THREE.Material, trunkMat: THREE.Material): void {
+    const group = new THREE.Group();
+    const trunkGeo = new THREE.CylinderGeometry(0.14 * scale, 0.22 * scale, 1.6 * scale, 6);
+    const coneGeo = new THREE.ConeGeometry(1.15 * scale, 2.6 * scale, 7);
+    const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+    trunk.position.y = 0.8 * scale;
+    trunk.castShadow = true;
+    const c1 = new THREE.Mesh(coneGeo, foliageMat);
+    c1.position.y = 2.2 * scale;
+    c1.castShadow = true;
+    const c2 = new THREE.Mesh(coneGeo, foliageMat);
+    c2.position.y = 3.4 * scale;
+    c2.scale.setScalar(0.72);
+    c2.castShadow = true;
+    const c3 = new THREE.Mesh(coneGeo, foliageMat);
+    c3.position.y = 4.4 * scale;
+    c3.scale.setScalar(0.5);
+    c3.castShadow = true;
+    group.add(trunk, c1, c2, c3);
+    group.position.set(x, 0, z);
+    this.mapGroup.add(group);
+    this.raycastTargets.push(trunk, c1, c2, c3);
+    this.mapDisposables.push(trunkGeo, coneGeo);
+    const r = 0.5 * scale;
+    this.obstacles.push({ minX: x - r, maxX: x + r, minZ: z - r, maxZ: z + r, maxY: 4.5 * scale });
+  }
+
+  private addMountainRing(mat: THREE.Material): void {
+    const coneGeo = new THREE.ConeGeometry(18, 34, 7);
+    this.mapDisposables.push(coneGeo);
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * Math.PI * 2 + 0.3;
+      const r = 88 + (i % 3) * 10;
+      const m = new THREE.Mesh(coneGeo, mat);
+      m.position.set(Math.cos(a) * r, 8, Math.sin(a) * r);
+      m.scale.set(1 + (i % 3) * 0.5, 0.8 + (i % 4) * 0.35, 1);
+      m.rotation.y = a;
+      this.mapGroup.add(m);
+    }
+  }
+
+  private addMoltenVat(x: number, z: number, vatMat: THREE.Material, glowMat: THREE.Material): void {
+    const group = new THREE.Group();
+    const bodyGeo = new THREE.CylinderGeometry(1.7, 1.9, 2.3, 14);
+    const rimGeo = new THREE.TorusGeometry(1.68, 0.12, 8, 18);
+    rimGeo.rotateX(Math.PI / 2);
+    const meltGeo = new THREE.CylinderGeometry(1.55, 1.55, 0.1, 14);
+    const legGeo = new THREE.BoxGeometry(0.3, 0.5, 0.3);
+
+    const body = new THREE.Mesh(bodyGeo, vatMat);
+    body.position.y = 1.35;
+    body.castShadow = true;
+    body.receiveShadow = true;
+    const rim = new THREE.Mesh(rimGeo, vatMat);
+    rim.position.y = 2.5;
+    const melt = new THREE.Mesh(meltGeo, glowMat);
+    melt.position.y = 2.42;
+    group.add(body, rim, melt);
+    for (const [lx, lz] of [[-1.2, -1.2], [1.2, -1.2], [-1.2, 1.2], [1.2, 1.2]] as Array<[number, number]>) {
+      const leg = new THREE.Mesh(legGeo, vatMat);
+      leg.position.set(lx, 0.25, lz);
+      group.add(leg);
+    }
+
+    group.position.set(x, 0, z);
+    this.mapGroup.add(group);
+    this.raycastTargets.push(body);
+    this.mapDisposables.push(bodyGeo, rimGeo, meltGeo, legGeo);
+    this.obstacles.push({ minX: x - 1.95, maxX: x + 1.95, minZ: z - 1.95, maxZ: z + 1.95, maxY: 2.6 });
+
+    const light = new THREE.PointLight(0xff5a1a, 7.5, 15, 1.8);
+    light.position.set(x, 3.0, z);
+    this.mapGroup.add(light);
+    this.fireLights.push({ light, baseIntensity: 7.5, phase: x * 0.7 + z });
+  }
+
+  private addFurnaceStack(x: number, z: number, bodyMat: THREE.Material, rustMat: THREE.Material, glowMat: THREE.Material): void {
+    const group = new THREE.Group();
+    const stackGeo = new THREE.BoxGeometry(3.2, 6.4, 3.2);
+    const mouthGeo = new THREE.BoxGeometry(1.6, 1.4, 0.4);
+    const pipeGeo = new THREE.CylinderGeometry(0.28, 0.28, 4.4, 8);
+    const stack = new THREE.Mesh(stackGeo, bodyMat);
+    stack.position.y = 3.2;
+    stack.castShadow = true;
+    stack.receiveShadow = true;
+    const mouth = new THREE.Mesh(mouthGeo, glowMat);
+    mouth.position.set(0, 1.6, 1.62);
+    const pipe = new THREE.Mesh(pipeGeo, rustMat);
+    pipe.position.set(1.0, 5.4, -0.6);
+    pipe.rotation.z = 0.5;
+    group.add(stack, mouth, pipe);
+    group.position.set(x, 0, z);
+    group.rotation.y = Math.atan2(-x, -z) + Math.PI;
+    this.mapGroup.add(group);
+    this.raycastTargets.push(stack);
+    this.mapDisposables.push(stackGeo, mouthGeo, pipeGeo);
+    this.obstacles.push({ minX: x - 1.8, maxX: x + 1.8, minZ: z - 1.8, maxZ: z + 1.8, maxY: 6.6 });
+
+    const light = new THREE.PointLight(0xff6a22, 9.0, 20, 1.7);
+    light.position.set(x, 2.2, z);
+    this.mapGroup.add(light);
+    this.fireLights.push({ light, baseIntensity: 9.0, phase: z * 0.9 });
+  }
+
+  private addCatwalkSpan(
+    x1: number,
+    z1: number,
+    x2: number,
+    z2: number,
+    deckMat: THREE.Material,
+    railMat: THREE.Material,
+  ): void {
+    const dx = x2 - x1;
+    const dz = z2 - z1;
+    const len = Math.hypot(dx, dz);
+    const angle = Math.atan2(dz, dx);
+    const deckY = 3.1;
+
+    const deckGeo = new THREE.BoxGeometry(len, 0.22, 2.2);
+    const railGeo = new THREE.BoxGeometry(len, 0.7, 0.1);
+    const supGeo = new THREE.BoxGeometry(0.4, deckY, 0.4);
+    this.mapDisposables.push(deckGeo, railGeo, supGeo);
+
+    const group = new THREE.Group();
+    const deck = new THREE.Mesh(deckGeo, deckMat);
+    deck.position.y = deckY;
+    deck.castShadow = true;
+    deck.receiveShadow = true;
+    group.add(deck);
+    for (const side of [-1, 1]) {
+      const rail = new THREE.Mesh(railGeo, railMat);
+      rail.position.set(0, deckY + 0.45, side * 1.05);
+      group.add(rail);
+    }
+    // support columns at quarter points
+    for (const t of [0.25, 0.5, 0.75]) {
+      const sup = new THREE.Mesh(supGeo, railMat);
+      sup.position.set(-len / 2 + len * t, deckY / 2, 0);
+      sup.castShadow = true;
+      group.add(sup);
+      const px = x1 + dx * t;
+      const pz = z1 + dz * t;
+      this.obstacles.push({ minX: px - 0.3, maxX: px + 0.3, minZ: pz - 0.3, maxZ: pz + 0.3, maxY: deckY });
+    }
+    group.position.set((x1 + x2) / 2, 0, (z1 + z2) / 2);
+    group.rotation.y = -angle;
+    this.mapGroup.add(group);
+    this.raycastTargets.push(deck);
+
+    // Ground ramps up to both ends of the span
+    this.addSlopedRamp({
+      centerX: x1,
+      centerZ: z1,
+      width: 2.0,
+      length: 6.0,
+      lowY: 0,
+      highY: deckY,
+      axis: 'x',
+      dir: angle > 0 ? -1 : 1,
+      mat: deckMat,
+      railMat: railMat,
+      withRails: true,
+    });
+    this.addSlopedRamp({
+      centerX: x2,
+      centerZ: z2,
+      width: 2.0,
+      length: 6.0,
+      lowY: 0,
+      highY: deckY,
+      axis: 'x',
+      dir: angle > 0 ? 1 : -1,
+      mat: deckMat,
+      railMat: railMat,
+      withRails: true,
+    });
   }
 
   private buildDistantSkyline(colorHex: number): void {
@@ -2652,6 +3830,14 @@ export class World {
       b.mat.emissiveIntensity = b.baseIntensity * pulse;
     }
 
+    for (const rf of this.radiationFx) {
+      const pulse = 0.72 + 0.28 * Math.sin(elapsed * 3.2 + rf.phase);
+      rf.ringMat.opacity = 0.55 + 0.4 * pulse;
+      rf.discMat.opacity = 0.05 + 0.09 * pulse;
+      rf.disc.rotation.z = elapsed * 0.22 + rf.phase;
+      rf.ring.rotation.z = -elapsed * 0.35 + rf.phase;
+    }
+
     for (let i = 0; i < this.windSocks.length; i++) {
       const ws = this.windSocks[i];
       ws.rotation.y = Math.sin(elapsed * 1.7 + i) * 0.25 + 0.35;
@@ -2689,6 +3875,13 @@ export class World {
           arr[i + 2] += dt * 1.8;
           if (arr[i] > 42) arr[i] = -42;
           if (arr[i + 1] < 0.2) arr[i + 1] = 14;
+          if (arr[i + 2] > 42) arr[i + 2] = -42;
+        } else if (this.particleMode === 'rain') {
+          arr[i] += dt * 2.2;
+          arr[i + 1] -= dt * 26;
+          arr[i + 2] += dt * 1.2;
+          if (arr[i] > 42) arr[i] = -42;
+          if (arr[i + 1] < 0.1) arr[i + 1] = 15;
           if (arr[i + 2] > 42) arr[i + 2] = -42;
         } else if (this.particleMode === 'dust') {
           arr[i] += dt * 1.5;

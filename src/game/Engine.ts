@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
@@ -6,16 +7,24 @@ import {
   ENEMY_SPECS,
   MAP_LIGHTING_PROFILES,
   MAP_SPECS,
+  MAX_LEVEL,
+  WAVES_PER_LEVEL,
   computeDirectionalDamageAngle,
   computeExplosionSplashDamage,
+  getLevelConfig,
+  getRadiationIntensityAt,
+  getSurfaceFloorHeight,
   getZoneAt,
 } from './rules';
 import { SoundEngine } from './Audio';
 import { World } from './World';
-import type { FragDetonationEvent, PropDamageOutcome } from './World';
+import type { DrivableVehicle, FragDetonationEvent, PropDamageOutcome } from './World';
 import { Player } from './Player';
 import { Weapons } from './Weapons';
 import { Enemies } from './Enemies';
+import { VehicleController } from './Vehicle';
+import { RemoteOperators, StrikeChannel } from './multiplayer';
+import type { MpEvent, MpPeerInfo, MpPose } from './multiplayer';
 import type {
   GamePhase,
   GameSettings,
@@ -23,6 +32,8 @@ import type {
   HudSnapshot,
   KillFeedEntry,
   MapId,
+  MultiplayerPeer,
+  ScoreEntry,
   WeaponId,
 } from './types';
 
@@ -48,6 +59,7 @@ export class Engine {
   private readonly camera: THREE.PerspectiveCamera;
   private composer: EffectComposer | null = null;
   private bloomPass: UnrealBloomPass | null = null;
+  private environmentTexture: THREE.Texture | null = null;
 
   private readonly sound: SoundEngine;
   private readonly world: World;
@@ -58,6 +70,25 @@ export class Engine {
   private phase: GamePhase = 'title';
   private settings: GameSettings;
   private wave = 1;
+  private waveInLevel = 1;
+  private vehicle: VehicleController | null = null;
+  private nearVehicle: DrivableVehicle | null = null;
+  private radiationIntensity = 0;
+  private radiationDps = 0;
+  private radiationLabel = '';
+  private geigerTimer = 0;
+  private radiationPulseTimer = 0;
+  private mpChannel: StrikeChannel | null = null;
+  private remoteOps: RemoteOperators | null = null;
+  private mpPoseTimer = 0;
+  private mpScoreTimer = 0;
+  private mpEventTimer = 0;
+  private mpLastShotEventAt = 0;
+  private mpPeers: MpPeerInfo[] = [];
+  private mpUnsubs: Array<() => void> = [];
+  private mpScores = new Map<string, { kills: number; deaths: number }>();
+  private mpDeaths = 0;
+  private mpDownNotified = new Set<string>();
   private waveClearDelay = 0;
   private waveBannerTimer = 0;
   private waveClearBannerTimer = 0;
@@ -124,6 +155,8 @@ export class Engine {
     this.scene = new THREE.Scene();
     this.camera = new THREE.PerspectiveCamera(74, width / height, 0.05, 280);
     this.scene.add(this.camera);
+    this.environmentTexture = this.createEnvironmentTexture();
+    this.scene.environment = this.environmentTexture;
 
     if (!this.isSoftwareGl) {
       this.composer = new EffectComposer(this.renderer);
@@ -207,6 +240,39 @@ export class Engine {
     }
   }
 
+  private createEnvironmentTexture(): THREE.Texture {
+    const pmrem = new THREE.PMREMGenerator(this.renderer);
+    const envScene = new RoomEnvironment();
+    const addCard = (
+      width: number,
+      height: number,
+      color: THREE.Color,
+      position: [number, number, number],
+    ) => {
+      const geo = new THREE.PlaneGeometry(width, height);
+      const mat = new THREE.MeshBasicMaterial({ color, side: THREE.DoubleSide });
+      const card = new THREE.Mesh(geo, mat);
+      card.position.set(position[0], position[1], position[2]);
+      card.lookAt(0, 0, 0);
+      envScene.add(card);
+    };
+
+    addCard(9, 7, new THREE.Color(5.6, 4.9, 3.9), [5, 7, -6]);
+    addCard(7, 5, new THREE.Color(1.6, 3.1, 5.2), [-6, 4, 5]);
+    addCard(8, 8, new THREE.Color(2.4, 2.6, 3.1), [0, 9, 0]);
+    addCard(10, 6, new THREE.Color(1.1, 1.0, 0.85), [0, -6, 2]);
+
+    const envTex = pmrem.fromScene(envScene, 0.04).texture;
+    envScene.traverse((child) => {
+      if (!(child instanceof THREE.Mesh)) return;
+      child.geometry.dispose();
+      const materials = Array.isArray(child.material) ? child.material : [child.material];
+      for (const mat of materials) mat.dispose();
+    });
+    pmrem.dispose();
+    return envTex;
+  }
+
   private applyMapLightingProfile(mapId: MapId): void {
     const profile = MAP_LIGHTING_PROFILES[mapId];
     this.renderer.toneMappingExposure = profile.exposure;
@@ -274,8 +340,13 @@ export class Engine {
     this.player.unlockPointer();
     this.player.clearInputs();
     this.sound.setWindActive(false);
-    this.weapons.reset();
+    this.sound.setEngine(false, 0);
+    this.vehicle = null;
+    this.nearVehicle = null;
+    this.radiationIntensity = 0;
+    for (const v of this.world.drivableVehicles) v.occupied = false;
     this.weapons.setVisible(false);
+    this.weapons.reset();
     this.weapons.setShowcaseState(true, this.previewWeapon);
     this.world.clearPickups();
     this.world.clearDecals();
@@ -300,8 +371,15 @@ export class Engine {
 
     this.phase = 'playing';
     document.body.dataset.state = 'playing';
-    this.wave = 1;
+    const levelCfg = getLevelConfig(this.settings.level);
+    this.wave = (this.settings.level - 1) * WAVES_PER_LEVEL + 1;
+    this.waveInLevel = 1;
     this.waveClearDelay = 0;
+    this.vehicle = null;
+    this.nearVehicle = null;
+    this.radiationIntensity = 0;
+    this.geigerTimer = 0;
+    this.enemies.aggroRadius = levelCfg.aggroRadius;
     this.waveBannerTimer = 2.4;
     this.waveClearBannerTimer = 0;
     this.kills = 0;
@@ -322,11 +400,15 @@ export class Engine {
 
     this.player.reset(MAP_SPECS[this.settings.mapId].playerSpawn);
     this.weapons.reset();
+    if (levelCfg.ammoMult > 1) {
+      this.weapons.addAmmo(levelCfg.ammoMult - 1);
+    }
+    for (const v of this.world.drivableVehicles) v.occupied = false;
     this.weapons.setShowcaseState(false);
     this.weapons.setVisible(true);
     this.world.clearPickups();
     this.world.clearDecals();
-    this.enemies.spawnWave(1, this.player.position);
+    this.enemies.spawnWave(this.wave, this.player.position, this.settings.level);
 
     if (requestLock) {
       this.player.lockPointer();
@@ -342,6 +424,7 @@ export class Engine {
     this.player.unlockPointer();
     this.player.clearInputs();
     this.sound.setWindActive(false);
+    this.sound.setEngine(false, 0);
     this.emitHudSnapshot();
   }
 
@@ -362,6 +445,7 @@ export class Engine {
     this.player.unlockPointer();
     this.player.clearInputs();
     this.sound.setWindActive(false);
+    this.sound.setEngine(false, 0);
     this.emitHudSnapshot();
   }
 
@@ -406,6 +490,9 @@ export class Engine {
       this.updateTitleTour(dt);
     } else if (this.phase === 'playing') {
       this.updatePlaying(dt);
+    } else if (this.phase === 'levelclear') {
+      this.world.update(dt, this.elapsed);
+      this.enemies.update(dt, this.player, false, () => {});
     }
 
     if (this.composer && !this.isSoftwareGl) {
@@ -455,8 +542,17 @@ export class Engine {
     const died = this.player.takeDamage(dmg);
     this.emitHudSnapshot();
     if (died) {
+      this.notePlayerDown();
       this.isDefeatPending = true;
       this.defeatBeatTimer = 0.48;
+    }
+  }
+
+  /** Count a local elimination for the multiplayer scoreboard (once per death). */
+  private notePlayerDown(): void {
+    if (this.mpChannel) {
+      this.mpDeaths++;
+      this.mpChannel.broadcastScore({ kills: this.kills, deaths: this.mpDeaths });
     }
   }
 
@@ -617,6 +713,7 @@ export class Engine {
     }
 
     const weaponInputs = this.player.consumeWeaponInputs();
+    const interactPressed = this.player.consumeInteractPressed();
     const spec = this.weapons.getActiveSpec();
     const isAds =
       weaponInputs.adsHeld &&
@@ -625,15 +722,56 @@ export class Engine {
       !spec.isMelee &&
       !this.weapons.grenadeThrowing;
 
-    const moveMetrics = this.player.update(
-      dt,
-      this.world.obstacles,
-      this.world.ramps,
-      spec.adsFov,
-      isAds,
-    );
+    let crosshairSpreadPx = 12;
 
-    const weaponOut = this.weapons.update(
+    if (this.vehicle) {
+      // ---------------- DRIVING ----------------
+      const obstaclesForVehicle = this.world.obstacles.filter(
+        (o) => o !== this.vehicle!.vehicle.obstacle,
+      );
+      this.vehicle.update(
+        dt,
+        this.player.getVehicleInput(),
+        obstaclesForVehicle,
+        this.world.ramps,
+        () => {
+          this.player.addTrauma(0.32);
+          this.sound.playSlide();
+        },
+      );
+      this.vehicle.updateCamera(this.camera, dt);
+      // Anchor player to vehicle so enemies/radiation/pickups track correctly
+      this.player.position.set(
+        this.vehicle.position.x,
+        this.vehicle.position.y,
+        this.vehicle.position.z,
+      );
+      this.player.velocity.set(0, 0, 0);
+      this.sound.setEngine(
+        true,
+        Math.abs(this.vehicle.speed) / this.vehicle.maxSpeed,
+        this.vehicle.vehicle.kind,
+      );
+      if (interactPressed) {
+        this.exitVehicle();
+      }
+    } else {
+      // ---------------- ON FOOT ----------------
+      const moveMetrics = this.player.update(
+        dt,
+        this.world.obstacles,
+        this.world.ramps,
+        spec.adsFov,
+        isAds,
+      );
+
+      // Proximity prompt + enter
+      this.nearVehicle = this.findNearestVehicle(3.6);
+      if (interactPressed && this.nearVehicle && !this.nearVehicle.occupied) {
+        this.enterVehicle(this.nearVehicle);
+      }
+
+      const weaponOut = this.weapons.update(
       dt,
       this.player,
       weaponInputs,
@@ -676,10 +814,34 @@ export class Engine {
       },
       () => {
         this.shotsFired++;
+        // Relay gunfire events (throttled) so remote clients can render tracers.
+        if (this.mpChannel?.supported) {
+          const now = performance.now();
+          if (now - this.mpLastShotEventAt > 130) {
+            this.mpLastShotEventAt = now;
+            this.mpChannel.broadcastEvent({
+              k: 'shot',
+              x: this.player.position.x,
+              y: this.player.position.y + 1.55,
+              z: this.player.position.z,
+              yaw: this.player.getYawRadians(),
+            });
+          }
+        }
       },
       (outcome) => this.handlePropOutcome(outcome),
-      (origin, vel) => this.world.spawnFragGrenade(origin, vel),
-    );
+      (origin, vel) => {
+        this.world.spawnFragGrenade(origin, vel);
+        this.mpChannel?.broadcastEvent?.({
+          k: 'nade',
+          x: origin.x,
+          y: origin.y,
+          z: origin.z,
+        });
+      },
+      );
+      crosshairSpreadPx = weaponOut.crosshairSpreadPx;
+    }
 
     this.enemies.update(dt, this.player, false, (dmg, attackerPos) => {
       this.applyPlayerHit(dmg, attackerPos);
@@ -707,22 +869,94 @@ export class Engine {
       }
     }
 
+    // ---------------- Radiation hazard ----------------
+    const rad = getRadiationIntensityAt(
+      this.player.position.x,
+      this.player.position.z,
+      this.settings.mapId,
+    );
+    this.radiationIntensity = rad ? rad.intensity : 0;
+    this.radiationLabel = rad ? rad.zone.label : '';
+    this.radiationDps = 0;
+    if (rad) {
+      const levelCfg = getLevelConfig(this.settings.level);
+      const dps = rad.zone.dps * rad.intensity * levelCfg.radiationMult;
+      this.radiationDps = dps;
+      this.player.health = Math.max(0, this.player.health - dps * rawDt);
+      this.damageFlash = Math.max(this.damageFlash, 0.16 * rad.intensity);
+      // Geiger click rate scales with intensity
+      this.geigerTimer -= rawDt;
+      if (this.geigerTimer <= 0) {
+        this.sound.playGeiger();
+        this.geigerTimer = THREE.MathUtils.lerp(0.55, 0.055, rad.intensity);
+      }
+      // Sentries near the hot zone agitate
+      this.radiationPulseTimer -= rawDt;
+      if (this.radiationPulseTimer <= 0) {
+        this.radiationPulseTimer = 0.6;
+        this.enemies.alertNearRadiation(
+          new THREE.Vector3(rad.zone.x, 0, rad.zone.z),
+          rad.zone.radius * 0.75,
+        );
+      }
+      if (this.player.health <= 0 && !this.isDefeatPending) {
+        this.notePlayerDown();
+        this.isDefeatPending = true;
+        this.defeatBeatTimer = 0.48;
+      }
+    } else {
+      this.geigerTimer = 0.12;
+      this.radiationPulseTimer = 0;
+    }
+
+    // ---------------- Multiplayer pose relay ----------------
+    if (this.mpChannel && this.mpChannel.supported) {
+      this.mpPoseTimer += rawDt;
+      if (this.mpPoseTimer >= 0.12) {
+        this.mpPoseTimer = 0;
+        const horizSpeed = Math.hypot(this.player.velocity.x, this.player.velocity.z);
+        const pose: MpPose = {
+          x: this.player.position.x,
+          y: this.player.position.y,
+          z: this.player.position.z,
+          yaw: this.player.getYawRadians(),
+          hp: Math.round(this.player.health),
+          skin: this.settings.weaponSkin,
+          dead: this.player.health <= 0 || this.isDefeatPending,
+          moving: horizSpeed > 0.8,
+          ads: this.player.isAds,
+        };
+        this.mpChannel.broadcastPose(pose);
+      }
+      // Scoreboard heartbeat — keeps remote Tab-scores fresh.
+      this.mpScoreTimer += rawDt;
+      if (this.mpScoreTimer >= 1.0) {
+        this.mpScoreTimer = 0;
+        this.mpChannel.broadcastScore({ kills: this.kills, deaths: this.mpDeaths });
+      }
+    }
+
     const alive = this.enemies.getAliveCount();
     if (alive === 0) {
       if (this.waveClearDelay <= 0) {
         this.waveClearDelay = 2.2;
         this.waveClearBannerTimer = 1.65;
         this.sound.playWaveSwell();
-        this.emitHudSnapshot(weaponOut.crosshairSpreadPx);
+        this.emitHudSnapshot(crosshairSpreadPx);
       } else {
         this.waveClearDelay -= rawDt;
         if (this.waveClearDelay <= 0) {
+          if (this.waveInLevel >= WAVES_PER_LEVEL) {
+            this.completeLevel();
+            return;
+          }
+          this.waveInLevel++;
           this.wave++;
           this.waveBannerTimer = 2.4;
           this.player.heal(15);
           this.weapons.addAmmo(0.5);
-          this.enemies.spawnWave(this.wave, this.player.position);
-          this.emitHudSnapshot(weaponOut.crosshairSpreadPx);
+          this.enemies.spawnWave(this.wave, this.player.position, this.settings.level);
+          this.emitHudSnapshot(crosshairSpreadPx);
         }
       }
     }
@@ -734,8 +968,160 @@ export class Engine {
     this.hudEmitAccum += rawDt;
     if (this.hudEmitAccum >= 0.055) {
       this.hudEmitAccum = 0;
-      this.emitHudSnapshot(weaponOut.crosshairSpreadPx);
+      this.emitHudSnapshot(crosshairSpreadPx);
     }
+  }
+
+  private completeLevel(): void {
+    if (this.phase !== 'playing') return;
+    this.phase = 'levelclear';
+    document.body.dataset.state = 'levelclear';
+    this.player.unlockPointer();
+    this.player.clearInputs();
+    this.sound.setWindActive(false);
+    this.sound.setEngine(false, 0);
+    this.sound.playWaveSwell();
+    this.remoteOps?.sync([]);
+    this.emitHudSnapshot();
+  }
+
+  /** Advance to the next difficulty level (capped at MAX_LEVEL) and redeploy. */
+  deployNextLevel(): void {
+    this.settings.level = Math.min(MAX_LEVEL, this.settings.level + 1);
+    this.deploy(true);
+  }
+
+  /** Replay the current level from wave 1. */
+  replayLevel(): void {
+    this.deploy(true);
+  }
+
+  private findNearestVehicle(maxDist: number): DrivableVehicle | null {
+    let best: DrivableVehicle | null = null;
+    let bestD = maxDist;
+    for (const v of this.world.drivableVehicles) {
+      if (v.occupied) continue;
+      const dx = v.group.position.x - this.player.position.x;
+      const dz = v.group.position.z - this.player.position.z;
+      const d = Math.hypot(dx, dz);
+      if (d < bestD) {
+        bestD = d;
+        best = v;
+      }
+    }
+    return best;
+  }
+
+  private enterVehicle(v: DrivableVehicle): void {
+    this.vehicle = new VehicleController(v);
+    v.occupied = true;
+    this.player.velocity.set(0, 0, 0);
+    this.weapons.setVisible(false);
+    this.sound.playVehicleDoor();
+    this.player.addTrauma(0.08);
+  }
+
+  private exitVehicle(): void {
+    const vc = this.vehicle;
+    if (!vc) return;
+    const h = vc.heading;
+    // Exit to the right side of the vehicle
+    const rx = -Math.cos(h);
+    const rz = Math.sin(h);
+    const exitX = vc.position.x + rx * (vc.vehicle.halfX + 1.15);
+    const exitZ = vc.position.z + rz * (vc.vehicle.halfX + 1.15);
+    const floorY = getSurfaceFloorHeight(exitX, exitZ, vc.position.y, 0.5, this.world.obstacles, this.world.ramps);
+    this.player.position.set(exitX, floorY, exitZ);
+    this.player.velocity.set(0, 0, 0);
+    vc.vehicle.occupied = false;
+    this.vehicle = null;
+    this.weapons.setVisible(true);
+    this.sound.setEngine(false, 0);
+    this.sound.playVehicleDoor();
+  }
+
+  attachMultiplayer(channel: StrikeChannel | null): void {
+    for (const u of this.mpUnsubs) u();
+    this.mpUnsubs = [];
+    this.mpChannel = channel;
+    this.mpPeers = [];
+    this.mpPoseTimer = 0;
+    this.mpScoreTimer = 0;
+    this.mpEventTimer = 0;
+    this.mpDeaths = 0;
+    this.mpDownNotified.clear();
+    if (channel) this.mpScores.clear();
+    this.remoteOps?.dispose();
+    this.remoteOps = null;
+    if (!channel) {
+      this.emitHudSnapshot();
+      return;
+    }
+    if (channel.supported) {
+      this.remoteOps = new RemoteOperators(this.scene);
+    }
+    const peerEntry = (p: MpPeerInfo) => ({
+      id: p.id,
+      nickname: p.nickname,
+      skin: p.skin,
+    });
+    this.mpUnsubs.push(
+      channel.onPeers((peers) => {
+        this.mpPeers = peers;
+        this.remoteOps?.sync(peers.map(peerEntry));
+        this.emitHudSnapshot();
+      }),
+      channel.onPose((id, pose) => {
+        this.remoteOps?.updatePose(id, pose);
+        // Elimination detection: pose reports hp<=0 / dead flag.
+        if ((pose.dead || pose.hp <= 0) && !this.mpDownNotified.has(id)) {
+          this.mpDownNotified.add(id);
+          const nick = this.mpPeers.find((p) => p.id === id)?.nickname ?? 'OPERATOR';
+          this.mpScores.set(id, {
+            ...(this.mpScores.get(id) ?? { kills: 0, deaths: 0 }),
+            deaths: (this.mpScores.get(id)?.deaths ?? 0) + 1,
+          });
+          this.killFeed.unshift({
+            id: this.nextKillId++,
+            text: `OPERATOR DOWN // ${nick}`,
+            headshot: false,
+            archetype: 'trooper',
+            timestamp: this.elapsed,
+          });
+          if (this.killFeed.length > 4) this.killFeed.length = 4;
+          this.emitHudSnapshot();
+        } else if (!pose.dead && pose.hp > 0) {
+          this.mpDownNotified.delete(id);
+        }
+      }),
+      channel.onScore((id, score) => {
+        this.mpScores.set(id, { kills: score.kills, deaths: score.deaths });
+        this.emitHudSnapshot();
+      }),
+      channel.onStart(() => {
+        // Fresh match — wipe the scoreboard.
+        this.mpScores.clear();
+        this.mpDeaths = 0;
+        this.mpDownNotified.clear();
+        this.emitHudSnapshot();
+      }),
+      channel.onEvent((_id, _event) => {
+        // Remote combat events are visual-only for now; poses carry the state.
+      }),
+    );
+    this.emitHudSnapshot();
+  }
+
+  /** Reset the multiplayer scoreboard (called by the host when a match launches). */
+  resetMultiplayerScores(): void {
+    this.mpScores.clear();
+    this.mpDeaths = 0;
+    this.mpDownNotified.clear();
+    this.emitHudSnapshot();
+  }
+
+  getCurrentLevel(): number {
+    return this.settings.level;
   }
 
   private emitHudSnapshot(crosshairSpread = 12): void {
@@ -775,7 +1161,7 @@ export class Engine {
       weaponSkin: this.settings.weaponSkin,
       health: Math.round(this.player.health),
       maxHealth: this.player.maxHealth,
-      wave: this.wave,
+      wave: this.waveInLevel,
       enemiesRemaining: this.enemies.getAliveCount(),
       waveBannerTimer: this.waveBannerTimer,
       waveClearBannerTimer: this.waveClearBannerTimer,
@@ -810,13 +1196,91 @@ export class Engine {
       pointerLocked: this.player.controls.isLocked,
       killFeed: [...this.killFeed],
       stats: {
-        wave: this.wave,
+        wave: this.waveInLevel,
         kills: this.kills,
         headshots: this.headshots,
         shotsFired: this.shotsFired,
         shotsHit: this.shotsHit,
       },
+      levelInfo: {
+        level: this.settings.level,
+        label: getLevelConfig(this.settings.level).label,
+        waveInLevel: this.waveInLevel,
+        wavesPerLevel: WAVES_PER_LEVEL,
+      },
+      vehicle: {
+        active: Boolean(this.vehicle),
+        nearPrompt: !this.vehicle && Boolean(this.nearVehicle),
+        speedKmh: this.vehicle ? Math.round(Math.abs(this.vehicle.speed) * 3.6) : 0,
+        label: this.vehicle ? this.vehicle.vehicle.label : this.nearVehicle?.label ?? '',
+      },
+      radiation: {
+        active: this.radiationIntensity > 0.02,
+        intensity: this.radiationIntensity,
+        dps: this.radiationDps,
+      },
+      multiplayer: this.buildMultiplayerHud(),
     });
+  }
+
+  private buildMultiplayerHud() {
+    const empty = {
+      enabled: false,
+      roomCode: '',
+      nickname: '',
+      isHost: false,
+      connected: false,
+      peers: [] as MultiplayerPeer[],
+      matchMode: this.settings.matchMode,
+      tier: this.settings.tier,
+      scores: [] as ScoreEntry[],
+    };
+    if (!this.mpChannel) {
+      return empty;
+    }
+    const self: MultiplayerPeer = {
+      id: this.mpChannel.selfId,
+      nickname: this.mpChannel.nickname,
+      ready: this.mpChannel.isReady,
+      isHost: this.mpChannel.isHost,
+      skin: this.settings.weaponSkin,
+    };
+    const peers: MultiplayerPeer[] = [self, ...this.mpPeers.map((p) => ({
+      id: p.id,
+      nickname: p.nickname,
+      ready: p.ready,
+      isHost: p.isHost,
+      skin: p.skin,
+    }))];
+
+    // Team assignment for team-based modes: alternate alpha/bravo by slot.
+    const teamBased = this.settings.matchMode !== 'survival';
+    const scores: ScoreEntry[] = peers.map((p, idx) => {
+      const sc = p.id === this.mpChannel!.selfId
+        ? { kills: this.kills, deaths: this.mpDeaths }
+        : this.mpScores.get(p.id) ?? { kills: 0, deaths: 0 };
+      return {
+        id: p.id,
+        nickname: p.nickname,
+        kills: sc.kills,
+        deaths: sc.deaths,
+        team: teamBased ? (idx % 2 === 0 ? 'alpha' : 'bravo') : null,
+        isSelf: p.id === this.mpChannel!.selfId,
+      };
+    });
+    scores.sort((a, b) => b.kills - a.kills || a.deaths - b.deaths || a.nickname.localeCompare(b.nickname));
+
+    return {
+      enabled: true,
+      roomCode: this.mpChannel.roomCode,
+      nickname: this.mpChannel.nickname,
+      isHost: this.mpChannel.isHost,
+      connected: this.mpChannel.supported,
+      peers,
+      matchMode: this.settings.matchMode,
+      tier: this.settings.tier,
+      scores,
+    };
   }
 
   dispose(): void {
@@ -830,6 +1294,13 @@ export class Engine {
     this.weapons.dispose();
     this.player.dispose();
     this.world.dispose();
+    for (const u of this.mpUnsubs) u();
+    this.mpUnsubs = [];
+    this.mpChannel = null;
+    this.remoteOps?.dispose();
+    this.remoteOps = null;
+    this.environmentTexture?.dispose();
+    this.environmentTexture = null;
     this.sound.dispose();
     if (this.composer) {
       this.composer.dispose();

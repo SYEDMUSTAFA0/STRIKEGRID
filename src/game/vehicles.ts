@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { ProceduralTextureLibrary } from './textures';
+import { loadOptionalModel, normalizeVehicleModel } from './modelAssets';
 import type { AABB2D, RampCollider } from './types';
 
 export interface WorldBuildContext {
@@ -97,6 +98,125 @@ function addStaticBox(
   return mesh;
 }
 
+interface WheelMaterialSet {
+  tire: THREE.Material;
+  rim: THREE.Material;
+  hub: THREE.Material;
+  spoke?: THREE.Material;
+}
+
+function makeTireGeometry(radius: number, width: number): THREE.LatheGeometry {
+  const inner = radius * 0.72;
+  const halfWidth = width * 0.5;
+  const profile = [
+    new THREE.Vector2(inner, -halfWidth * 0.84),
+    new THREE.Vector2(radius * 0.78, -halfWidth * 0.92),
+    new THREE.Vector2(radius * 0.94, -halfWidth * 0.56),
+    new THREE.Vector2(radius, -halfWidth * 0.18),
+    new THREE.Vector2(radius, halfWidth * 0.18),
+    new THREE.Vector2(radius * 0.94, halfWidth * 0.56),
+    new THREE.Vector2(radius * 0.78, halfWidth * 0.92),
+    new THREE.Vector2(inner, halfWidth * 0.84),
+    new THREE.Vector2(inner, -halfWidth * 0.84),
+  ];
+  const geo = new THREE.LatheGeometry(profile, 28);
+  geo.rotateZ(Math.PI / 2);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function addWheelAssembly(
+  ctx: WorldBuildContext,
+  parent: THREE.Object3D,
+  radius: number,
+  width: number,
+  mats: WheelMaterialSet,
+): THREE.Group {
+  const wheel = new THREE.Group();
+
+  const tireGeo = makeTireGeometry(radius, width);
+  addPart(ctx, wheel, tireGeo, mats.tire, 0, 0, 0);
+
+  const rimGeo = new THREE.CylinderGeometry(radius * 0.68, radius * 0.68, width * 0.9, 22, 1, true);
+  rimGeo.rotateZ(Math.PI / 2);
+  addPart(ctx, wheel, rimGeo, mats.rim, 0, 0, 0);
+
+  const rimLipGeo = new THREE.TorusGeometry(radius * 0.7, width * 0.055, 8, 26);
+  rimLipGeo.rotateY(Math.PI / 2);
+  addPart(ctx, wheel, rimLipGeo, mats.rim, 0, 0, 0);
+
+  const spokeGeo = new THREE.BoxGeometry(width * 0.14, radius * 0.48, width * 0.07);
+  spokeGeo.translate(0, radius * 0.44, 0);
+  for (let i = 0; i < 5; i++) {
+    addPart(ctx, wheel, spokeGeo, mats.spoke ?? mats.hub, 0, 0, 0, (i / 5) * Math.PI * 2, 0, 0);
+  }
+
+  const hubGeo = new THREE.CylinderGeometry(radius * 0.2, radius * 0.2, width * 1.14, 14);
+  hubGeo.rotateZ(Math.PI / 2);
+  addPart(ctx, wheel, hubGeo, mats.hub, 0, 0, 0);
+
+  const brakeGeo = new THREE.CylinderGeometry(radius * 0.3, radius * 0.3, width * 0.16, 18);
+  brakeGeo.rotateZ(Math.PI / 2);
+  addPart(ctx, wheel, brakeGeo, mats.hub, -width * 0.34, 0, 0);
+
+  parent.add(wheel);
+  ctx.wheels.push(wheel);
+  return wheel;
+}
+
+function topLevelNamedMatches(root: THREE.Object3D, pattern: RegExp): THREE.Object3D[] {
+  const matches: THREE.Object3D[] = [];
+  root.traverse((child) => {
+    if (child === root || !child.name || !pattern.test(child.name)) return;
+    let parent = child.parent;
+    let nested = false;
+    while (parent && parent !== root) {
+      if (parent.name && pattern.test(parent.name)) {
+        nested = true;
+        break;
+      }
+      parent = parent.parent;
+    }
+    if (!nested) matches.push(child);
+  });
+  return matches;
+}
+
+function queueOptionalVehicleModel(
+  ctx: WorldBuildContext,
+  group: THREE.Group,
+  preservedRoots: ReadonlySet<THREE.Object3D>,
+  paths: readonly string[],
+  targetLength: number,
+): void {
+  void loadOptionalModel(paths)
+    .then((model) => {
+      if (!model || group.userData.optionalVehicleApplied || !group.parent) return;
+      const normalized = normalizeVehicleModel(model, targetLength);
+      if (!normalized) return;
+      normalized.position.y = 0;
+      for (const wheel of topLevelNamedMatches(normalized, /wheel|tire|rim|hub/i)) {
+        wheel.visible = false;
+      }
+      const externalRoot = new THREE.Group();
+      externalRoot.name = 'optionalVehicleModel';
+      externalRoot.add(normalized);
+      group.add(externalRoot);
+      const hidden = new Set<THREE.Object3D>();
+      for (const child of group.children) {
+        if (child !== externalRoot && !preservedRoots.has(child)) {
+          child.visible = false;
+          hidden.add(child);
+        }
+      }
+      for (let i = ctx.raycastTargets.length - 1; i >= 0; i--) {
+        if (hidden.has(ctx.raycastTargets[i])) ctx.raycastTargets.splice(i, 1);
+      }
+      group.userData.optionalVehicleApplied = true;
+    })
+    .catch(() => undefined);
+}
+
 /**
  * Multi-part 3D Tactical / Recon Motorcycle (Bike) with spinning wheels, forks, fairing, exhaust & lights.
  */
@@ -109,6 +229,8 @@ export function addTacticalMotorcycle(
   accentColorHex = 0xf59e0b,
 ): THREE.Group {
   const group = new THREE.Group();
+  const wheelRoot = new THREE.Group();
+  group.add(wheelRoot);
   const tireTex = ctx.texLib.createTireTreadTexture();
 
   const paintMat = new THREE.MeshStandardMaterial({
@@ -156,6 +278,18 @@ export function addTacticalMotorcycle(
     emissiveIntensity: 1.8,
     roughness: 0.2,
   });
+  const lensMat = new THREE.MeshPhysicalMaterial({
+    color: 0xfff6da,
+    roughness: 0.05,
+    metalness: 0.0,
+    transparent: true,
+    opacity: 0.82,
+    clearcoat: 1,
+    clearcoatRoughness: 0.04,
+    envMapIntensity: 2.2,
+    emissive: 0xffe9b8,
+    emissiveIntensity: 0.55,
+  });
   const shadowMat = new THREE.MeshBasicMaterial({
     map: ctx.texLib.createContactShadowTexture(),
     transparent: true,
@@ -171,6 +305,7 @@ export function addTacticalMotorcycle(
     accentMat,
     headlightMat,
     tailLightMat,
+    lensMat,
     shadowMat,
   );
 
@@ -182,32 +317,18 @@ export function addTacticalMotorcycle(
   group.add(shadow);
   ctx.disposables.push(shadowGeo);
 
-  // Front & Rear Wheel Assemblies (radius ~0.34m)
+  // Front & Rear Wheel Assemblies with lathed tire profile, sidewall depth, rim lip, spokes & hub
   const buildWheel = (wz: number) => {
-    const wheelGroup = new THREE.Group();
-    wheelGroup.position.set(0, 0.34, wz);
-
-    const tireGeo = new THREE.CylinderGeometry(0.34, 0.34, 0.16, 18);
-    tireGeo.rotateZ(Math.PI / 2);
-    addPart(ctx, wheelGroup, tireGeo, tireMat, 0, 0, 0);
-
-    const rimGeo = new THREE.CylinderGeometry(0.22, 0.22, 0.17, 14);
-    rimGeo.rotateZ(Math.PI / 2);
-    addPart(ctx, wheelGroup, rimGeo, alloyMat, 0, 0, 0);
-
-    const discGeo = new THREE.CylinderGeometry(0.16, 0.16, 0.19, 12);
-    discGeo.rotateZ(Math.PI / 2);
-    addPart(ctx, wheelGroup, discGeo, frameMat, 0, 0, 0);
-
-    for (let s = 0; s < 5; s++) {
-      const spokeGeo = new THREE.BoxGeometry(0.175, 0.032, 0.42);
-      addPart(ctx, wheelGroup, spokeGeo, frameMat, 0, 0, 0, (s / 5) * Math.PI, 0, 0);
-    }
-    group.add(wheelGroup);
-    ctx.wheels.push(wheelGroup);
+    const wheelGroup = addWheelAssembly(ctx, wheelRoot, 0.36, 0.18, {
+      tire: tireMat,
+      rim: alloyMat,
+      hub: frameMat,
+      spoke: alloyMat,
+    });
+    wheelGroup.position.set(0, 0.36, wz);
   };
-  buildWheel(0.76);
-  buildWheel(-0.78);
+  buildWheel(0.78);
+  buildWheel(-0.8);
 
   // Sculpted chassis, fuel tank & tail cowl silhouette
   const bodyGeo = makeBeveledBox(
@@ -229,62 +350,106 @@ export function addTacticalMotorcycle(
   bodyGeo.rotateY(Math.PI / 2);
   addPart(ctx, group, bodyGeo, paintMat, 0, 0, 0, 0, 0, 0, true);
 
-  // Engine block & radiator core
+  // Engine block, cooling fins & radiator core
   const engineGeo = new THREE.BoxGeometry(0.36, 0.34, 0.56);
   addPart(ctx, group, engineGeo, frameMat, 0, 0.46, 0.02, 0, 0, 0, true);
+  const finGeo = new THREE.BoxGeometry(0.035, 0.24, 0.4);
+  for (const side of [-1, 1]) {
+    for (let fin = 0; fin < 4; fin++) {
+      addPart(ctx, group, finGeo, alloyMat, side * 0.185, 0.52, -0.1 + fin * 0.11);
+    }
+  }
+
+  // Sculpted fuel tank with clearcoat paint and accent spine
+  const tankGeo = new THREE.SphereGeometry(0.5, 20, 14);
+  tankGeo.scale(0.36, 0.3, 0.62);
+  addPart(ctx, group, tankGeo, paintMat, 0, 0.88, 0.3);
+  const tankStripeGeo = new THREE.BoxGeometry(0.07, 0.045, 0.66);
+  addPart(ctx, group, tankStripeGeo, accentMat, 0, 1.02, 0.3, 0.08, 0, 0);
 
   // Contoured Rider Saddle
   const seatGeo = new THREE.BoxGeometry(0.32, 0.1, 0.62);
   addPart(ctx, group, seatGeo, seatMat, 0, 0.78, -0.34, -0.08, 0, 0);
 
-  // Accent Tank Stripe
-  const stripeGeo = new THREE.BoxGeometry(0.37, 0.06, 0.46);
-  addPart(ctx, group, stripeGeo, accentMat, 0, 0.84, 0.24, 0.12, 0, 0);
-
-  // Twin Angled Front Forks & Handlebars
-  const forkGeo = new THREE.CylinderGeometry(0.028, 0.028, 0.78, 10);
-  for (const sx of [-0.12, 0.12]) {
-    addPart(ctx, group, forkGeo, alloyMat, sx, 0.68, 0.63, -0.34, 0, 0);
+  // Twin angled front forks, triple clamp, bars, grips & mirrors
+  const forkGeo = new THREE.CylinderGeometry(0.03, 0.026, 0.82, 12);
+  for (const sx of [-0.13, 0.13]) {
+    addPart(ctx, group, forkGeo, alloyMat, sx, 0.67, 0.64, -0.38, 0, 0);
   }
-  const barGeo = new THREE.CylinderGeometry(0.022, 0.022, 0.76, 10);
+  const clampGeo = new THREE.BoxGeometry(0.36, 0.07, 0.14);
+  addPart(ctx, group, clampGeo, frameMat, 0, 1.0, 0.56);
+  const barGeo = new THREE.CylinderGeometry(0.024, 0.024, 0.78, 10);
   barGeo.rotateZ(Math.PI / 2);
-  addPart(ctx, group, barGeo, frameMat, 0, 1.0, 0.48);
+  addPart(ctx, group, barGeo, frameMat, 0, 1.04, 0.5);
 
-  const gripGeo = new THREE.CylinderGeometry(0.028, 0.028, 0.14, 8);
+  const gripGeo = new THREE.CylinderGeometry(0.03, 0.03, 0.16, 10);
   gripGeo.rotateZ(Math.PI / 2);
-  addPart(ctx, group, gripGeo, seatMat, -0.34, 1.0, 0.48);
-  addPart(ctx, group, gripGeo, seatMat, 0.34, 1.0, 0.48);
+  addPart(ctx, group, gripGeo, seatMat, -0.35, 1.04, 0.5);
+  addPart(ctx, group, gripGeo, seatMat, 0.35, 1.04, 0.5);
+  const mirrorStalkGeo = new THREE.CylinderGeometry(0.012, 0.012, 0.16, 8);
+  const mirrorGeo = new THREE.SphereGeometry(0.055, 10, 8);
+  mirrorGeo.scale(0.45, 1, 1);
+  for (const side of [-1, 1]) {
+    addPart(ctx, group, mirrorStalkGeo, frameMat, side * 0.36, 1.1, 0.48, 0, 0, side * 0.5);
+    addPart(ctx, group, mirrorGeo, alloyMat, side * 0.43, 1.17, 0.46);
+  }
 
-  // Front Windscreen & Headlight / Taillight
-  const screenGeo = new THREE.BoxGeometry(0.34, 0.26, 0.03);
-  addPart(ctx, group, screenGeo, frameMat, 0, 0.98, 0.62, -0.58, 0, 0);
-
-  const headGeo = new THREE.BoxGeometry(0.24, 0.1, 0.08);
-  addPart(ctx, group, headGeo, headlightMat, 0, 0.76, 0.74);
+  // Front cowl, windscreen, headlight housing + physical lens, and tail lamp
+  const screenGeo = new THREE.BoxGeometry(0.34, 0.28, 0.035);
+  addPart(ctx, group, screenGeo, lensMat, 0, 1.0, 0.6, -0.58, 0, 0);
+  const headHousingGeo = new THREE.CylinderGeometry(0.095, 0.11, 0.13, 14);
+  headHousingGeo.rotateX(Math.PI / 2);
+  addPart(ctx, group, headHousingGeo, frameMat, 0, 0.78, 0.8);
+  const headBulbGeo = new THREE.CylinderGeometry(0.07, 0.07, 0.045, 12);
+  headBulbGeo.rotateX(Math.PI / 2);
+  addPart(ctx, group, headBulbGeo, headlightMat, 0, 0.78, 0.84);
+  const headLensGeo = new THREE.SphereGeometry(0.085, 14, 10);
+  headLensGeo.scale(1, 1, 0.55);
+  addPart(ctx, group, headLensGeo, lensMat, 0, 0.78, 0.88);
 
   const tailGeo = new THREE.BoxGeometry(0.18, 0.07, 0.07);
   addPart(ctx, group, tailGeo, tailLightMat, 0, 0.8, -0.94);
+  const tailHousingGeo = new THREE.BoxGeometry(0.22, 0.11, 0.06);
+  addPart(ctx, group, tailHousingGeo, frameMat, 0, 0.8, -0.9);
 
-  // Upswept Exhaust Muffler & Chrome Tip
+  // Swingarms, upswept exhaust, muffler and chrome tip
+  const swingGeo = new THREE.CylinderGeometry(0.032, 0.032, 1.05, 10);
+  swingGeo.rotateX(Math.PI / 2);
+  addPart(ctx, group, swingGeo, frameMat, -0.13, 0.38, -0.22);
+  addPart(ctx, group, swingGeo, frameMat, 0.13, 0.38, -0.22);
   const exhaustGeo = new THREE.CylinderGeometry(0.045, 0.038, 0.72, 10);
   exhaustGeo.rotateX(Math.PI / 2 - 0.16);
   addPart(ctx, group, exhaustGeo, alloyMat, 0.21, 0.38, -0.52);
+  const mufflerGeo = new THREE.CylinderGeometry(0.075, 0.065, 0.56, 12);
+  mufflerGeo.rotateX(Math.PI / 2);
+  addPart(ctx, group, mufflerGeo, alloyMat, 0.22, 0.42, -0.86);
+  const tipGeo = new THREE.CylinderGeometry(0.055, 0.05, 0.12, 12);
+  tipGeo.rotateX(Math.PI / 2);
+  addPart(ctx, group, tipGeo, alloyMat, 0.22, 0.47, -1.16);
 
   // Kickstand tilt subtly (~4 deg) for realism
   group.position.set(x, 0, z);
   group.rotation.set(0, rotY, 0.05);
   ctx.mapGroup.add(group);
 
-  const halfX = Math.abs(Math.cos(rotY)) * 0.44 + Math.abs(Math.sin(rotY)) * 1.12;
-  const halfZ = Math.abs(Math.sin(rotY)) * 0.44 + Math.abs(Math.cos(rotY)) * 1.12;
+  const halfX = Math.abs(Math.cos(rotY)) * 0.46 + Math.abs(Math.sin(rotY)) * 1.22;
+  const halfZ = Math.abs(Math.sin(rotY)) * 0.46 + Math.abs(Math.cos(rotY)) * 1.22;
   ctx.obstacles.push({
     minX: x - halfX,
     maxX: x + halfX,
     minZ: z - halfZ,
     maxZ: z + halfZ,
     minY: 0,
-    maxY: 1.22,
+    maxY: 1.28,
   });
+
+  queueOptionalVehicleModel(
+    ctx,
+    group,
+    new Set([wheelRoot, shadow]),
+    ['/models/bike.glb', '/models/motorcycle.glb', '/models/bike.gltf'],
+    2.35,
+  );
 
   return group;
 }
@@ -317,6 +482,8 @@ export function addTacticalVehicle(
     registerStaticCollision = true,
   } = opts;
   const group = new THREE.Group();
+  const wheelRoot = new THREE.Group();
+  group.add(wheelRoot);
   const tireTex = ctx.texLib.createTireTreadTexture();
 
   const paintMat = new THREE.MeshStandardMaterial({
@@ -329,10 +496,17 @@ export function addTacticalVehicle(
     roughness: 0.56,
     metalness: 0.72,
   });
-  const glassMat = new THREE.MeshStandardMaterial({
-    color: 0x0f172a,
-    roughness: 0.1,
-    metalness: 0.45,
+  const glassMat = new THREE.MeshPhysicalMaterial({
+    color: 0x101c2a,
+    roughness: 0.06,
+    metalness: 0.35,
+    transparent: true,
+    opacity: 0.58,
+    clearcoat: 1,
+    clearcoatRoughness: 0.05,
+    envMapIntensity: 1.9,
+    side: THREE.DoubleSide,
+    depthWrite: false,
   });
   const tireMat = new THREE.MeshStandardMaterial({
     color: 0xffffff,
@@ -362,6 +536,18 @@ export function addTacticalVehicle(
     emissive: 0xdc2626,
     emissiveIntensity: 1.7,
   });
+  const lensMat = new THREE.MeshPhysicalMaterial({
+    color: 0xfff3cf,
+    roughness: 0.04,
+    metalness: 0.0,
+    transparent: true,
+    opacity: 0.78,
+    clearcoat: 1,
+    clearcoatRoughness: 0.03,
+    envMapIntensity: 2.4,
+    emissive: 0xffe9b8,
+    emissiveIntensity: 0.5,
+  });
   const beaconMat = new THREE.MeshStandardMaterial({
     color: beaconColorHex,
     emissive: beaconColorHex,
@@ -383,9 +569,17 @@ export function addTacticalVehicle(
     accentMat,
     headlightMat,
     tailMat,
+    lensMat,
     beaconMat,
     shadowMat,
   );
+
+  const wheelPositions: Array<[number, number]> = [
+    [-0.94, 1.36],
+    [0.94, 1.36],
+    [-0.94, -1.36],
+    [0.94, -1.36],
+  ];
 
   // Contact shadow under truck/SUV
   const shadowGeo = new THREE.PlaneGeometry(2.7, 5.1);
@@ -416,6 +610,14 @@ export function addTacticalVehicle(
   lowerHullGeo.rotateY(Math.PI / 2);
   addPart(ctx, group, lowerHullGeo, paintMat, 0, 0, 0, 0, 0, 0, true);
 
+  // Inner wheel-arch liners and outer flares give the tires real clearance and depth
+  const linerGeo = new THREE.BoxGeometry(0.24, 0.56, 1.18);
+  const flareGeo = new THREE.BoxGeometry(0.14, 0.12, 1.28);
+  for (const [wx, wz] of wheelPositions) {
+    addPart(ctx, group, linerGeo, chassisMat, wx * 0.78, 0.58, wz);
+    addPart(ctx, group, flareGeo, paintMat, wx + Math.sign(wx) * 0.2, 0.98, wz);
+  }
+
   if (variant === 'suv') {
     // Full SUV Cabin
     const cabinGeo = makeBeveledBox(
@@ -439,6 +641,10 @@ export function addTacticalVehicle(
     addPart(ctx, group, sideGlassGeo, glassMat, 0, 1.4, -0.62);
     const rearGlassGeo = new THREE.BoxGeometry(1.48, 0.48, 0.08);
     addPart(ctx, group, rearGlassGeo, glassMat, 0, 1.42, -1.85, 0.2, 0, 0);
+    const pillarGeo = new THREE.BoxGeometry(0.09, 0.58, 0.12);
+    for (const px of [-0.78, 0, 0.78]) {
+      addPart(ctx, group, pillarGeo, paintMat, px, 1.42, 0.62 - Math.abs(px) * 0.12, -0.54, 0, 0);
+    }
 
     // Roof Rack & Tactical Beacon Bar
     const rackGeo = new THREE.BoxGeometry(1.44, 0.08, 1.65);
@@ -465,6 +671,10 @@ export function addTacticalVehicle(
     addPart(ctx, group, windGeo, glassMat, 0, 1.4, 0.73, -0.54, 0, 0);
     const sideGlassGeo = new THREE.BoxGeometry(1.75, 0.46, 0.72);
     addPart(ctx, group, sideGlassGeo, glassMat, 0, 1.4, 0.1);
+    const pillarGeo = new THREE.BoxGeometry(0.09, 0.56, 0.12);
+    for (const px of [-0.72, 0.18]) {
+      addPart(ctx, group, pillarGeo, paintMat, px, 1.41, 0.62 - Math.abs(px) * 0.08, -0.54, 0, 0);
+    }
 
     // Bed rails & Rollbar
     const bedSideGeo = new THREE.BoxGeometry(0.14, 0.34, 1.68);
@@ -502,51 +712,45 @@ export function addTacticalVehicle(
   const rearBumperGeo = new THREE.BoxGeometry(1.88, 0.2, 0.16);
   addPart(ctx, group, rearBumperGeo, chassisMat, 0, 0.52, -2.2);
 
-  // Twin Headlights & Taillights
-  const hlGeo = new THREE.BoxGeometry(0.28, 0.14, 0.08);
+  // Twin headlight housings + physical lenses, grille slots and taillights
+  const hlHousingGeo = new THREE.BoxGeometry(0.34, 0.2, 0.12);
+  const hlLensGeo = new THREE.CylinderGeometry(0.11, 0.11, 0.05, 14);
+  hlLensGeo.rotateX(Math.PI / 2);
+  const hlBulbGeo = new THREE.CylinderGeometry(0.085, 0.085, 0.04, 14);
+  hlBulbGeo.rotateX(Math.PI / 2);
   const tlGeo = new THREE.BoxGeometry(0.22, 0.18, 0.08);
   for (const sx of [-0.66, 0.66]) {
-    addPart(ctx, group, hlGeo, headlightMat, sx, 0.84, 2.14);
+    addPart(ctx, group, hlHousingGeo, chassisMat, sx, 0.86, 2.12);
+    addPart(ctx, group, hlBulbGeo, headlightMat, sx, 0.86, 2.17);
+    addPart(ctx, group, hlLensGeo, lensMat, sx, 0.86, 2.2);
     addPart(ctx, group, tlGeo, tailMat, sx, 0.84, -2.14);
   }
+  const grilleSlotGeo = new THREE.BoxGeometry(0.09, 0.26, 0.04);
+  for (let slot = 0; slot < 5; slot++) {
+    addPart(ctx, group, grilleSlotGeo, chassisMat, -0.48 + slot * 0.24, 0.78, 2.19);
+  }
 
-  // Side Mirrors
+  // Side Mirrors with stalks and aerodynamic caps
+  const mirrorStalkGeo = new THREE.BoxGeometry(0.06, 0.05, 0.22);
   const mirrorGeo = new THREE.BoxGeometry(0.18, 0.12, 0.14);
-  addPart(ctx, group, mirrorGeo, chassisMat, -1.0, 1.24, 0.55);
-  addPart(ctx, group, mirrorGeo, chassisMat, 1.0, 1.24, 0.55);
+  const mirrorCapGeo = new THREE.BoxGeometry(0.19, 0.13, 0.05);
+  for (const side of [-1, 1]) {
+    addPart(ctx, group, mirrorStalkGeo, chassisMat, side * 0.92, 1.28, 0.62);
+    addPart(ctx, group, mirrorGeo, chassisMat, side * 1.0, 1.31, 0.72);
+    addPart(ctx, group, mirrorCapGeo, paintMat, side * 1.0, 1.31, 0.8);
+  }
 
-  // 4 Rotating Wheel Assemblies (radius 0.42m)
+  // 4 Rotating Wheel Assemblies with lathed tires, sidewalls, rims, spokes & hubs
   const localWheels: THREE.Object3D[] = [];
-  const wheelCoords: Array<[number, number]> = [
-    [-0.94, 1.36],
-    [0.94, 1.36],
-    [-0.94, -1.36],
-    [0.94, -1.36],
-  ];
-  for (const [wx, wz] of wheelCoords) {
-    const wg = new THREE.Group();
+  for (const [wx, wz] of wheelPositions) {
+    const wg = addWheelAssembly(ctx, wheelRoot, 0.42, 0.3, {
+      tire: tireMat,
+      rim: rimMat,
+      hub: chassisMat,
+      spoke: rimMat,
+    });
     wg.position.set(wx, 0.42, wz);
-
-    const tireGeo = new THREE.CylinderGeometry(0.42, 0.42, 0.3, 20);
-    tireGeo.rotateZ(Math.PI / 2);
-    addPart(ctx, wg, tireGeo, tireMat, 0, 0, 0);
-
-    const rimGeo = new THREE.CylinderGeometry(0.26, 0.26, 0.31, 14);
-    rimGeo.rotateZ(Math.PI / 2);
-    addPart(ctx, wg, rimGeo, rimMat, 0, 0, 0);
-
-    const hubGeo = new THREE.CylinderGeometry(0.11, 0.11, 0.34, 10);
-    hubGeo.rotateZ(Math.PI / 2);
-    addPart(ctx, wg, hubGeo, chassisMat, 0, 0, 0);
-
-    for (let s = 0; s < 5; s++) {
-      const spGeo = new THREE.BoxGeometry(0.32, 0.045, 0.46);
-      addPart(ctx, wg, spGeo, chassisMat, 0, 0, 0, (s / 5) * Math.PI, 0, 0);
-    }
-
-    group.add(wg);
     localWheels.push(wg);
-    ctx.wheels.push(wg);
   }
 
   group.position.set(x, 0, z);
@@ -567,6 +771,16 @@ export function addTacticalVehicle(
     };
     ctx.obstacles.push(collider);
   }
+
+  queueOptionalVehicleModel(
+    ctx,
+    group,
+    new Set([wheelRoot, shadow]),
+    variant === 'suv'
+      ? ['/models/suv.glb', '/models/car.glb', '/models/vehicle.glb', '/models/suv.gltf']
+      : ['/models/pickup.glb', '/models/truck.glb', '/models/car.glb', '/models/vehicle.glb', '/models/pickup.gltf'],
+    4.4,
+  );
 
   return { group, wheels: localWheels, collider };
 }

@@ -1,9 +1,11 @@
 import type {
   AABB2D,
+  DifficultyTierId,
   EnemyArchetype,
   EnemyAIState,
   EnemyRole,
   MapId,
+  MatchModeId,
   RampCollider,
   WeaponId,
   WeaponSkinId,
@@ -41,6 +43,27 @@ export const MAP_SPECS: Record<MapId, MapSpec> = {
     name: 'Desert Compound',
     subtitle: 'High Noon',
     badgeColor: '#fbbf24',
+    playerSpawn: { x: 0, y: 0, z: 34.5, yaw: 0 },
+  },
+  neon_docks: {
+    id: 'neon_docks',
+    name: 'Neon Docks',
+    subtitle: 'Night Harbor',
+    badgeColor: '#22d3ee',
+    playerSpawn: { x: 0, y: 0, z: 34.5, yaw: 0 },
+  },
+  highland_ridge: {
+    id: 'highland_ridge',
+    name: 'Highland Ridge',
+    subtitle: 'Golden Hour',
+    badgeColor: '#a3e635',
+    playerSpawn: { x: 0, y: 0, z: 34.5, yaw: 0 },
+  },
+  sunken_foundry: {
+    id: 'sunken_foundry',
+    name: 'Sunken Foundry',
+    subtitle: 'Molten Works',
+    badgeColor: '#fb923c',
     playerSpawn: { x: 0, y: 0, z: 34.5, yaw: 0 },
   },
 };
@@ -91,6 +114,39 @@ export const MAP_LIGHTING_PROFILES: Record<MapId, MapLightingProfile> = {
     tourTarget: [0, 2.4, -4],
     tourStartAngle: -0.68,
   },
+  neon_docks: {
+    exposure: 0.88,
+    envIntensity: 0.3,
+    bloomStrength: 0.3,
+    bloomRadius: 0.34,
+    bloomThreshold: 0.9,
+    tourRadius: 30,
+    tourHeight: 10.5,
+    tourTarget: [0, 2.6, -6],
+    tourStartAngle: 2.2,
+  },
+  highland_ridge: {
+    exposure: 0.9,
+    envIntensity: 0.42,
+    bloomStrength: 0.2,
+    bloomRadius: 0.3,
+    bloomThreshold: 0.96,
+    tourRadius: 32,
+    tourHeight: 11.5,
+    tourTarget: [0, 3.2, -4],
+    tourStartAngle: 0.9,
+  },
+  sunken_foundry: {
+    exposure: 0.86,
+    envIntensity: 0.32,
+    bloomStrength: 0.28,
+    bloomRadius: 0.32,
+    bloomThreshold: 0.92,
+    tourRadius: 27,
+    tourHeight: 9.5,
+    tourTarget: [0, 2.4, -6],
+    tourStartAngle: -1.9,
+  },
 };
 
 export const ZONE_SPECS: Record<ZoneId, ZoneSpec> = {
@@ -134,6 +190,63 @@ export function getZoneAt(x: number, z: number, _mapId?: MapId): ZoneId {
   return 'central';
 }
 
+export interface MatchModeSpec {
+  id: MatchModeId;
+  name: string;
+  short: string;
+  description: string;
+  /** true when remote players are split into opposing squads */
+  teamBased: boolean;
+  /** enemy wave pressure multiplier applied on top of level config */
+  pressureMult: number;
+}
+
+export const MATCH_MODE_SPECS: Record<MatchModeId, MatchModeSpec> = {
+  survival: {
+    id: 'survival',
+    name: 'Co-op Squad Survival',
+    short: 'SQUAD',
+    description: 'Team up against escalating waves & radiation zones.',
+    teamBased: false,
+    pressureMult: 1,
+  },
+  tdm: {
+    id: 'tdm',
+    name: 'Team Deathmatch',
+    short: 'TDM',
+    description: 'Squad vs squad — hostile fire teams contest the arena.',
+    teamBased: true,
+    pressureMult: 1.15,
+  },
+  ffa: {
+    id: 'ffa',
+    name: 'Free-For-All',
+    short: 'FFA',
+    description: 'Every operator for themselves. Last one standing wins.',
+    teamBased: true,
+    pressureMult: 1.1,
+  },
+  zone_control: {
+    id: 'zone_control',
+    name: 'Zone Control',
+    short: 'ZONE',
+    description: 'Capture and hold LZ-01, OPS-BLDG, BIO-WOODS and SEC-MAX.',
+    teamBased: true,
+    pressureMult: 1.05,
+  },
+};
+
+export const DIFFICULTY_TIERS: ReadonlyArray<{
+  id: DifficultyTierId;
+  name: string;
+  level: number;
+  hint: string;
+}> = [
+  { id: 'easy', name: 'EASY', level: 2, hint: 'LV 2 · Medium pressure' },
+  { id: 'medium', name: 'MEDIUM', level: 4, hint: 'LV 4 · Hard pressure' },
+  { id: 'hard', name: 'HARD', level: 6, hint: 'LV 6 · Extreme pressure' },
+];
+
 export interface WeaponSkinSpec {
   id: WeaponSkinId;
   name: string;
@@ -174,6 +287,9 @@ export const WEAPON_ORDER: readonly WeaponId[] = [
   'shotgun',
   'marksman',
   'knife',
+  'smg',
+  'lmg',
+  'deagle',
 ];
 
 export const WEAPON_SPECS: Record<WeaponId, WeaponSpec> = {
@@ -266,6 +382,72 @@ export const WEAPON_SPECS: Record<WeaponId, WeaponSpec> = {
     recoilYaw: 0.01,
     kickBack: 0.085,
     range: 180,
+  },
+  smg: {
+    id: 'smg',
+    name: 'KR-9 VECTOR SMG',
+    shortLabel: 'AUTO · 9MM',
+    keyBind: '6',
+    automatic: true,
+    fireRate: 13.2,
+    damage: 22,
+    headshotMultiplier: 2.1,
+    magSize: 30,
+    startReserve: 150,
+    maxReserve: 210,
+    reloadTime: 1.9,
+    baseSpread: 0.021,
+    adsSpread: 0.005,
+    moveSpreadPenalty: 0.014,
+    adsFov: 56,
+    recoilPitch: 0.014,
+    recoilYaw: 0.011,
+    kickBack: 0.045,
+    range: 95,
+  },
+  lmg: {
+    id: 'lmg',
+    name: 'M249 SAW LMG',
+    shortLabel: 'BELT · 5.56',
+    keyBind: '7',
+    automatic: true,
+    fireRate: 7.4,
+    damage: 30,
+    headshotMultiplier: 2.0,
+    magSize: 100,
+    startReserve: 200,
+    maxReserve: 300,
+    reloadTime: 4.4,
+    baseSpread: 0.032,
+    adsSpread: 0.009,
+    moveSpreadPenalty: 0.03,
+    adsFov: 50,
+    recoilPitch: 0.034,
+    recoilYaw: 0.016,
+    kickBack: 0.095,
+    range: 160,
+  },
+  deagle: {
+    id: 'deagle',
+    name: 'DEAGLE .50 TAC',
+    shortLabel: 'SEMI · .50',
+    keyBind: '8',
+    automatic: false,
+    fireRate: 3.6,
+    damage: 92,
+    headshotMultiplier: 2.2,
+    magSize: 7,
+    startReserve: 35,
+    maxReserve: 49,
+    reloadTime: 1.95,
+    baseSpread: 0.013,
+    adsSpread: 0.0028,
+    moveSpreadPenalty: 0.016,
+    adsFov: 55,
+    recoilPitch: 0.078,
+    recoilYaw: 0.022,
+    kickBack: 0.125,
+    range: 130,
   },
   knife: {
     id: 'knife',
@@ -560,13 +742,14 @@ export function computeHitDamage(
 /**
  * Computes wave difficulty scaling across enemy count, speed, accuracy, and archetype mix.
  */
-export function getWaveConfig(wave: number): WaveConfig {
+export function getWaveConfig(wave: number, level = 1): WaveConfig {
   const w = Math.max(1, Math.floor(wave));
-  const enemyCount = Math.min(22, 4 + (w - 1) * 2);
-  const speedMultiplier = Math.min(1.48, 1 + (w - 1) * 0.06);
-  const accuracy = Math.min(0.84, 0.36 + (w - 1) * 0.055);
-  const strikerWeight = w >= 2 ? Math.min(0.4, 0.2 + (w - 2) * 0.05) : 0.15;
-  const juggernautWeight = w >= 3 ? Math.min(0.28, 0.12 + (w - 3) * 0.04) : 0;
+  const lv = getLevelConfig(level);
+  const enemyCount = Math.min(30, Math.round((4 + (w - 1) * 2) * lv.enemyCountMult));
+  const speedMultiplier = Math.min(1.6, (1 + (w - 1) * 0.06) * lv.speedMult);
+  const accuracy = Math.min(0.92, 0.36 + (w - 1) * 0.055 + lv.accuracyBonus);
+  const strikerWeight = w >= 2 ? Math.min(0.45, 0.2 + (w - 2) * 0.05 + lv.strikerBonus) : 0.15;
+  const juggernautWeight = w >= 3 ? Math.min(0.34, 0.12 + (w - 3) * 0.04 + lv.juggernautBonus) : 0;
   const trooperWeight = Math.max(0.25, 1 - strikerWeight - juggernautWeight);
 
   return {
@@ -678,6 +861,36 @@ const MARKSMAN_RECOIL_PATTERN: ReadonlyArray<readonly [number, number]> = [
   [1.05, 0.06],
 ];
 
+const SMG_RECOIL_PATTERN: ReadonlyArray<readonly [number, number]> = [
+  [0.72, 0.06],
+  [0.8, -0.09],
+  [0.86, 0.14],
+  [0.9, 0.2],
+  [0.78, -0.18],
+  [0.7, 0.1],
+  [0.66, -0.3],
+  [0.62, 0.28],
+];
+
+const LMG_RECOIL_PATTERN: ReadonlyArray<readonly [number, number]> = [
+  [0.9, 0.05],
+  [1.0, -0.06],
+  [1.12, 0.12],
+  [1.2, 0.24],
+  [1.1, 0.3],
+  [0.95, -0.22],
+  [0.85, -0.4],
+  [0.8, 0.35],
+  [0.75, 0.5],
+  [0.7, -0.3],
+];
+
+const DEAGLE_RECOIL_PATTERN: ReadonlyArray<readonly [number, number]> = [
+  [1.0, 0.05],
+  [1.1, -0.12],
+  [1.05, 0.18],
+];
+
 export function getRecoilPatternStep(
   weaponId: WeaponId,
   streakIndex: number,
@@ -692,7 +905,13 @@ export function getRecoilPatternStep(
         ? SHOTGUN_RECOIL_PATTERN
         : weaponId === 'marksman'
           ? MARKSMAN_RECOIL_PATTERN
-          : PISTOL_RECOIL_PATTERN;
+          : weaponId === 'smg'
+            ? SMG_RECOIL_PATTERN
+            : weaponId === 'lmg'
+              ? LMG_RECOIL_PATTERN
+              : weaponId === 'deagle'
+                ? DEAGLE_RECOIL_PATTERN
+                : PISTOL_RECOIL_PATTERN;
   const entry = pattern[Math.max(0, streakIndex) % pattern.length];
   const adsScale = isAds ? 0.68 : 1.0;
   return {
@@ -743,4 +962,151 @@ export function getEnemyRole(archetype: EnemyArchetype, unitIndex: number): Enem
   if (archetype === 'striker') return 'rusher';
   if (archetype === 'juggernaut') return unitIndex % 2 === 0 ? 'marksman' : 'rifleman';
   return unitIndex % 3 === 0 ? 'marksman' : 'rifleman';
+}
+
+// ---------------------------------------------------------------------------
+// Difficulty levels (Easy -> Extreme)
+// ---------------------------------------------------------------------------
+
+export const LEVELS_PER_TIER = { easy: 2, medium: 2, hard: 2 } as const;
+export const WAVES_PER_LEVEL = 3;
+export const MAX_LEVEL = 8;
+
+export interface LevelConfig {
+  level: number;
+  label: 'EASY' | 'MEDIUM' | 'HARD' | 'EXTREME';
+  enemyCountMult: number;
+  speedMult: number;
+  accuracyBonus: number;
+  strikerBonus: number;
+  juggernautBonus: number;
+  radiationMult: number;
+  ammoMult: number;
+  aggroRadius: number;
+}
+
+function levelTier(level: number): LevelConfig['label'] {
+  if (level <= 2) return 'EASY';
+  if (level <= 4) return 'MEDIUM';
+  if (level <= 6) return 'HARD';
+  return 'EXTREME';
+}
+
+const LEVEL_TIER_PARAMS: Record<LevelConfig['label'], Omit<LevelConfig, 'level' | 'label'>> = {
+  EASY: {
+    enemyCountMult: 0.8,
+    speedMult: 0.92,
+    accuracyBonus: -0.08,
+    strikerBonus: -0.05,
+    juggernautBonus: -0.04,
+    radiationMult: 0.6,
+    ammoMult: 1.25,
+    aggroRadius: 7,
+  },
+  MEDIUM: {
+    enemyCountMult: 1.0,
+    speedMult: 1.0,
+    accuracyBonus: 0,
+    strikerBonus: 0,
+    juggernautBonus: 0,
+    radiationMult: 1.0,
+    ammoMult: 1.0,
+    aggroRadius: 8.5,
+  },
+  HARD: {
+    enemyCountMult: 1.18,
+    speedMult: 1.08,
+    accuracyBonus: 0.06,
+    strikerBonus: 0.05,
+    juggernautBonus: 0.04,
+    radiationMult: 1.5,
+    ammoMult: 0.85,
+    aggroRadius: 10,
+  },
+  EXTREME: {
+    enemyCountMult: 1.38,
+    speedMult: 1.16,
+    accuracyBonus: 0.12,
+    strikerBonus: 0.08,
+    juggernautBonus: 0.07,
+    radiationMult: 2.1,
+    ammoMult: 0.7,
+    aggroRadius: 12,
+  },
+};
+
+export function getLevelConfig(level: number): LevelConfig {
+  const lv = Math.max(1, Math.min(MAX_LEVEL, Math.floor(level)));
+  const label = levelTier(lv);
+  // Within a tier, later levels get a small extra ramp.
+  const step = (lv - 1) % (label === 'EXTREME' ? MAX_LEVEL - 6 : 2);
+  const ramp = step * 0.06;
+  const base = LEVEL_TIER_PARAMS[label];
+  return {
+    level: lv,
+    label,
+    enemyCountMult: base.enemyCountMult * (1 + ramp * 0.5),
+    speedMult: base.speedMult + ramp * 0.04,
+    accuracyBonus: base.accuracyBonus + ramp * 0.02,
+    strikerBonus: base.strikerBonus + ramp * 0.01,
+    juggernautBonus: base.juggernautBonus + ramp * 0.01,
+    radiationMult: base.radiationMult * (1 + ramp * 0.4),
+    ammoMult: base.ammoMult * (1 - ramp * 0.15),
+    aggroRadius: base.aggroRadius + ramp * 1.5,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Radiation hazard zones (per map, world XZ + radius + base dps)
+// ---------------------------------------------------------------------------
+
+export interface RadiationZoneSpec {
+  x: number;
+  z: number;
+  radius: number;
+  dps: number;
+  label: string;
+}
+
+export const RADIATION_ZONES: Record<MapId, RadiationZoneSpec[]> = {
+  dusk_yard: [
+    { x: 2, z: -36, radius: 11, dps: 5, label: 'SECTOR C HOTZONE' },
+  ],
+  arctic_outpost: [
+    { x: -14, z: -18, radius: 10, dps: 4, label: 'CRYO LEAK' },
+    { x: 16, z: 8, radius: 8, dps: 6, label: 'REACTOR BLEED' },
+  ],
+  desert_compound: [
+    { x: 0, z: -30, radius: 12, dps: 5, label: 'SCORCHED CACHE' },
+  ],
+  neon_docks: [
+    { x: -22, z: -28, radius: 10, dps: 7, label: 'CHEMICAL BERTH' },
+    { x: 20, z: 18, radius: 8, dps: 5, label: 'FUEL SIPHON' },
+  ],
+  highland_ridge: [
+    { x: -18, z: -24, radius: 11, dps: 4, label: 'ORE VEIN' },
+    { x: 18, z: -8, radius: 9, dps: 6, label: 'RELAY ARRAY' },
+  ],
+  sunken_foundry: [
+    { x: 0, z: -22, radius: 13, dps: 9, label: 'MOLTEN CORE' },
+    { x: -20, z: 10, radius: 8, dps: 5, label: 'SLAG PIT' },
+  ],
+};
+
+export function getRadiationIntensityAt(
+  x: number,
+  z: number,
+  mapId: MapId,
+): { zone: RadiationZoneSpec; intensity: number } | null {
+  const zones = RADIATION_ZONES[mapId];
+  let best: { zone: RadiationZoneSpec; intensity: number } | null = null;
+  for (const zone of zones) {
+    const d = Math.hypot(x - zone.x, z - zone.z);
+    if (d >= zone.radius) continue;
+    // Full intensity in the core 55%, linear falloff to the edge.
+    const core = zone.radius * 0.55;
+    const intensity = d <= core ? 1 : 1 - (d - core) / (zone.radius - core);
+    if (!best || intensity > best.intensity) best = { zone, intensity };
+  }
+  return best;
 }

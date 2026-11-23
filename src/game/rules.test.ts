@@ -19,7 +19,10 @@ import {
   getRampHeightAt,
   getRecoilPatternStep,
   getSurfaceFloorHeight,
+  getLevelConfig,
+  getRadiationIntensityAt,
   getWaveConfig,
+  RADIATION_ZONES,
   getZoneAt,
   isPointClearOfObstacles,
   pickArchetypeForWave,
@@ -27,11 +30,30 @@ import {
 } from './rules';
 import type { RampCollider } from './types';
 
-test('MAP_SPECS, WEAPON_ORDER, and WEAPON_SKIN_SPECS define all maps, 5 weapons, and 4 skins', () => {
-  assert.deepEqual(Object.keys(MAP_SPECS), ['dusk_yard', 'arctic_outpost', 'desert_compound']);
-  assert.deepEqual(WEAPON_ORDER, ['rifle', 'pistol', 'shotgun', 'marksman', 'knife']);
+test('MAP_SPECS, WEAPON_ORDER, and WEAPON_SKIN_SPECS define all maps, 8 weapons, and 4 skins', () => {
+  assert.deepEqual(Object.keys(MAP_SPECS), [
+    'dusk_yard',
+    'arctic_outpost',
+    'desert_compound',
+    'neon_docks',
+    'highland_ridge',
+    'sunken_foundry',
+  ]);
+  assert.deepEqual(WEAPON_ORDER, [
+    'rifle',
+    'pistol',
+    'shotgun',
+    'marksman',
+    'knife',
+    'smg',
+    'lmg',
+    'deagle',
+  ]);
   assert.equal(WEAPON_SPECS.shotgun.pellets, 8);
   assert.equal(WEAPON_SPECS.knife.isMelee, true);
+  assert.equal(WEAPON_SPECS.smg.automatic, true);
+  assert.equal(WEAPON_SPECS.lmg.magSize, 100);
+  assert.equal(WEAPON_SPECS.deagle.damage, 92);
   assert.equal(FRAG_GRENADE_SPEC.startCount, 3);
   assert.deepEqual(Object.keys(WEAPON_SKIN_SPECS), [
     'standard',
@@ -41,13 +63,17 @@ test('MAP_SPECS, WEAPON_ORDER, and WEAPON_SKIN_SPECS define all maps, 5 weapons,
   ]);
 });
 
-test('getNextWeaponId cycles cleanly forward and backward across all 5 loadout slots', () => {
+test('getNextWeaponId cycles cleanly forward and backward across all 8 loadout slots', () => {
   assert.equal(getNextWeaponId('rifle', 1), 'pistol');
   assert.equal(getNextWeaponId('pistol', 1), 'shotgun');
   assert.equal(getNextWeaponId('shotgun', 1), 'marksman');
   assert.equal(getNextWeaponId('marksman', 1), 'knife');
-  assert.equal(getNextWeaponId('knife', 1), 'rifle');
-  assert.equal(getNextWeaponId('rifle', -1), 'knife');
+  assert.equal(getNextWeaponId('knife', 1), 'smg');
+  assert.equal(getNextWeaponId('smg', 1), 'lmg');
+  assert.equal(getNextWeaponId('lmg', 1), 'deagle');
+  assert.equal(getNextWeaponId('deagle', 1), 'rifle');
+  assert.equal(getNextWeaponId('rifle', -1), 'deagle');
+  assert.equal(getNextWeaponId('deagle', -1), 'lmg');
 });
 
 test('getRampHeightAt and getSurfaceFloorHeight interpolate sloped ramps accurately', () => {
@@ -237,7 +263,14 @@ test('getZoneAt resolves all 4 named zones plus central yard and playerSpawn beg
     'restriction',
     'central',
   ]);
-  for (const mapId of ['dusk_yard', 'arctic_outpost', 'desert_compound'] as const) {
+  for (const mapId of [
+    'dusk_yard',
+    'arctic_outpost',
+    'desert_compound',
+    'neon_docks',
+    'highland_ridge',
+    'sunken_foundry',
+  ] as const) {
     const sp = MAP_SPECS[mapId].playerSpawn;
     assert.equal(getZoneAt(sp.x, sp.z, mapId), 'landing');
     assert.equal(getZoneAt(-28, 0, mapId), 'building');
@@ -247,6 +280,47 @@ test('getZoneAt resolves all 4 named zones plus central yard and playerSpawn beg
     const prof = MAP_LIGHTING_PROFILES[mapId];
     assert.ok(prof.exposure >= 0.75 && prof.exposure <= 1.0);
     assert.ok(prof.envIntensity >= 0.3 && prof.envIntensity <= 0.5);
-    assert.ok(prof.bloomThreshold >= 0.94);
+    assert.ok(prof.bloomThreshold >= 0.88);
+  }
+});
+
+test('getLevelConfig tiers scale smoothly from EASY to EXTREME', () => {
+  assert.equal(getLevelConfig(1).label, 'EASY');
+  assert.equal(getLevelConfig(2).label, 'EASY');
+  assert.equal(getLevelConfig(3).label, 'MEDIUM');
+  assert.equal(getLevelConfig(5).label, 'HARD');
+  assert.equal(getLevelConfig(7).label, 'EXTREME');
+  assert.equal(getLevelConfig(8).label, 'EXTREME');
+  const easy = getLevelConfig(1);
+  const extreme = getLevelConfig(8);
+  assert.ok(extreme.enemyCountMult > easy.enemyCountMult);
+  assert.ok(extreme.accuracyBonus > easy.accuracyBonus);
+  assert.ok(extreme.radiationMult > easy.radiationMult);
+  assert.ok(extreme.speedMult > easy.speedMult);
+  // getWaveConfig respects level scaling
+  const w1 = getWaveConfig(3, 1);
+  const w8 = getWaveConfig(3, 8);
+  assert.ok(w8.enemyCount >= w1.enemyCount);
+  assert.ok(w8.accuracy >= w1.accuracy);
+});
+
+test('radiation zones exist on every map and intensity falls off at edges', () => {
+  for (const mapId of [
+    'dusk_yard',
+    'arctic_outpost',
+    'desert_compound',
+    'neon_docks',
+    'highland_ridge',
+    'sunken_foundry',
+  ] as const) {
+    const zones = RADIATION_ZONES[mapId];
+    assert.ok(zones.length >= 1, `${mapId} should have radiation zones`);
+    const z = zones[0];
+    const center = getRadiationIntensityAt(z.x, z.z, mapId);
+    assert.ok(center && center.intensity > 0.9);
+    const outside = getRadiationIntensityAt(z.x + z.radius + 5, z.z, mapId);
+    assert.equal(outside, null);
+    const edge = getRadiationIntensityAt(z.x + z.radius * 0.9, z.z, mapId);
+    assert.ok(edge && edge.intensity > 0 && edge.intensity < 1);
   }
 });
