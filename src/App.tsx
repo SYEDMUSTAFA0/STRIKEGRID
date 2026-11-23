@@ -10,7 +10,9 @@ import {
   getBackendKind,
   getFriends,
   getOrCreateProfile,
+  registerAccount,
   removeFriend,
+  restoreSession,
   sanitizeCallsign,
   signInEmail,
   signInGoogle,
@@ -18,7 +20,13 @@ import {
   updateProfile,
   recordMatchResult,
 } from './game/auth';
-import type { FriendEntry, PlayerProfile } from './game/auth';
+import type { FriendEntry, PlayerProfile, RegistrationDetails } from './game/auth';
+import {
+  applyProfileDetails,
+  hydrateLocalProfileFromCloud,
+  pushProfileToCloud,
+} from './game/userProfile';
+import type { ProfileDetails } from './game/userProfile';
 import { createPresenceBackend } from './game/onlinePresence';
 import type { OnlinePlayer, PresenceBackend, PresenceInvite } from './game/onlinePresence';
 import type { FriendsLobbyProps, LobbyMatchConfig } from './components/FriendsLobby';
@@ -29,11 +37,16 @@ import {
   cgSyncMuted,
   initCrazyGames,
 } from './game/crazygames';
+import { VoiceChat } from './game/voice';
+import type { VoiceStatus } from './game/voice';
+import type { ChatLine } from './components/ChatBox';
 import { DIFFICULTY_TIERS } from './game/rules';
+import { TouchControls } from './components/TouchControls';
 import type {
   GameSettings,
   HudSnapshot,
   MapId,
+  SquadSide,
   WeaponId,
   WeaponSkinId,
 } from './game/types';
@@ -145,6 +158,8 @@ const INITIAL_HUD: HudSnapshot = {
     matchMode: 'survival',
     tier: 'easy',
     scores: [],
+    selfSide: null,
+    friendlyFire: false,
   },
 };
 
@@ -162,6 +177,7 @@ export default function App() {
     matchMode: 'survival',
     tier: 'easy',
     level: INITIAL_LEVEL,
+    friendlyFire: false,
   });
   const settingsRef = useRef<GameSettings>(settings);
   const [previewWeapon, setPreviewWeapon] = useState<WeaponId>('rifle');
@@ -178,6 +194,8 @@ export default function App() {
   const [backendKind] = useState(() => getBackendKind());
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState('');
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [profilePanelOpen, setProfilePanelOpen] = useState(false);
   const [onlinePlayers, setOnlinePlayers] = useState<OnlinePlayer[]>([]);
   const [friends, setFriends] = useState<FriendEntry[]>(() => getFriends());
   const [presenceInvite, setPresenceInvite] = useState<PresenceInvite | null>(null);
@@ -187,12 +205,28 @@ export default function App() {
     mapId: INITIAL_MAP,
     tier: 'easy',
     level: INITIAL_LEVEL,
+    friendlyFire: false,
   });
+  const [selfSide, setSelfSide] = useState<SquadSide>('attack');
   const matchConfigRef = useRef(matchConfig);
   const presenceRef = useRef<PresenceBackend | null>(null);
   const profileRef = useRef(profile);
   profileRef.current = profile;
   matchConfigRef.current = matchConfig;
+
+  // ---- Chat & voice state ----
+  const [lobbyChat, setLobbyChat] = useState<ChatLine[]>([]);
+  const [matchChat, setMatchChat] = useState<ChatLine[]>([]);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [voiceEnabled, setVoiceEnabled] = useState(false);
+  const [voiceMuted, setVoiceMuted] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState<VoiceStatus>('off');
+  const [voiceLevel, setVoiceLevel] = useState(0);
+  const [voicePeerCount, setVoicePeerCount] = useState(0);
+  const voiceRef = useRef<VoiceChat | null>(null);
+  const voiceSignalCbs = useRef(new Set<(fromId: string, payload: unknown) => void>());
+  const onlineIdsRef = useRef<string[]>([]);
+  onlineIdsRef.current = onlinePlayers.filter((p) => !p.isSelf).map((p) => p.id);
 
   useEffect(() => {
     const container = mountRef.current;
@@ -221,6 +255,8 @@ export default function App() {
     return () => {
       engine.dispose();
       engineRef.current = null;
+      voiceRef.current?.dispose();
+      voiceRef.current = null;
     };
     // Mount WebGL engine once
   }, []);
@@ -241,6 +277,7 @@ export default function App() {
     if (document.activeElement instanceof HTMLElement) {
       document.activeElement.blur();
     }
+    setChatOpen(false);
     engineRef.current?.deploy(true);
   }, []);
 
@@ -252,6 +289,7 @@ export default function App() {
   }, []);
 
   const handlePause = useCallback(() => {
+    setChatOpen(false);
     engineRef.current?.pauseGame();
   }, []);
 
@@ -272,6 +310,77 @@ export default function App() {
     settingsRef.current = merged;
     setSettings(merged);
     engineRef.current?.updateSettings(merged);
+  }, []);
+
+  // ---------------- Lobby chat & voice chat ----------------
+  const ensureVoice = useCallback((): VoiceChat => {
+    if (voiceRef.current) return voiceRef.current;
+    const v = new VoiceChat({
+      selfId: profileRef.current.id,
+      sendSignal: (to, payload) => presenceRef.current?.sendSignal?.(to, payload),
+      onSignal: (cb) => {
+        voiceSignalCbs.current.add(cb);
+        return () => {
+          voiceSignalCbs.current.delete(cb);
+        };
+      },
+      maxPeers: 6,
+    });
+    v.onStatus = (s) => setVoiceStatus(s);
+    v.onLocalLevel = (l) => setVoiceLevel(l);
+    v.onPeerLevel = () => {};
+    voiceRef.current = v;
+    return v;
+  }, []);
+
+  const handleToggleVoice = useCallback(async () => {
+    const v = ensureVoice();
+    if (v.isEnabled) {
+      v.disable();
+      presenceRef.current?.setVoiceActive?.(false);
+      setVoiceEnabled(false);
+      setVoicePeerCount(0);
+      return;
+    }
+    const ok = await v.enable();
+    setVoiceEnabled(ok);
+    if (ok) {
+      presenceRef.current?.setVoiceActive?.(true);
+      v.setPeers(onlineIdsRef.current);
+      setVoicePeerCount(Math.min(onlineIdsRef.current.length, 6));
+    }
+  }, [ensureVoice]);
+
+  const handleToggleVoiceMute = useCallback(() => {
+    setVoiceMuted((m) => {
+      const next = !m;
+      voiceRef.current?.setMuted(next);
+      return next;
+    });
+  }, []);
+
+  const handleSendLobbyChat = useCallback((text: string) => {
+    const line: ChatLine = {
+      id: `self-${Date.now()}`,
+      fromId: 'self',
+      fromName: profileRef.current.callsign,
+      text,
+      ts: Date.now(),
+    };
+    setLobbyChat((prev) => [...prev.slice(-59), line]);
+    presenceRef.current?.sendChat?.(text);
+  }, []);
+
+  const handleSendMatchChat = useCallback((text: string) => {
+    const line: ChatLine = {
+      id: `self-${Date.now()}`,
+      fromId: 'self',
+      fromName: profileRef.current.callsign,
+      text,
+      ts: Date.now(),
+    };
+    setMatchChat((prev) => [...prev.slice(-59), line]);
+    mpRef.current?.sendChat(text);
   }, []);
 
   // ---------------- CrazyGames portal integration ----------------
@@ -312,7 +421,11 @@ export default function App() {
       return s === 'playing' || s === 'paused' || s === 'levelclear' || s === 'gameover';
     };
     const onKeyDown = (e: KeyboardEvent) => {
-      if (inGameplay() && GAME_KEYS.has(e.code)) e.preventDefault();
+      if (!inGameplay()) return;
+      // Let text fields (chat) receive Space/arrows normally.
+      const el = document.activeElement;
+      if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return;
+      if (GAME_KEYS.has(e.code)) e.preventDefault();
     };
     const onWheel = (e: WheelEvent) => {
       if (inGameplay()) e.preventDefault();
@@ -331,14 +444,34 @@ export default function App() {
     presenceRef.current = backend;
     backend.onPlayers(setOnlinePlayers);
     backend.onInvite(setPresenceInvite);
+    backend.onChat?.((m) => {
+      setLobbyChat((prev) => [
+        ...prev.slice(-59),
+        { id: m.id, fromId: m.fromId, fromName: m.fromName, text: m.text, ts: m.ts },
+      ]);
+    });
+    // Fan presence-relay signals out to the voice session (if any).
+    backend.onSignal?.((fromId, payload) => {
+      for (const cb of voiceSignalCbs.current) cb(fromId, payload);
+    });
     backend.start(profile);
     return () => {
+      voiceRef.current?.dispose();
+      voiceRef.current = null;
       backend.dispose();
       presenceRef.current = null;
     };
     // Restart presence when the signed-in identity changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [profile.id, profile.backend, profile.method]);
+
+  // Keep the voice mesh pointed at whoever is currently online.
+  useEffect(() => {
+    voiceRef.current?.setPeers(onlineIdsRef.current);
+    if (voiceRef.current?.isEnabled) {
+      setVoicePeerCount(Math.min(onlineIdsRef.current.length, 6));
+    }
+  }, [onlinePlayers]);
 
   // Reflect lobby/match activity into presence status badges.
   useEffect(() => {
@@ -359,13 +492,34 @@ export default function App() {
     const prev = lastPhaseRef.current;
     lastPhaseRef.current = hud.phase;
     if (prev === 'playing' && hud.phase === 'gameover') {
-      updateProfile(recordMatchResult(hud.stats.kills, false));
+      const p = updateProfile(recordMatchResult(hud.stats.kills, false, 1));
+      void pushProfileToCloud(p);
       setProfile(getOrCreateProfile());
     } else if (prev === 'playing' && hud.phase === 'levelclear' && hud.levelInfo.level >= 8) {
-      updateProfile(recordMatchResult(hud.stats.kills, true));
+      const p = updateProfile(recordMatchResult(hud.stats.kills, true, 0));
+      void pushProfileToCloud(p);
       setProfile(getOrCreateProfile());
     }
   }, [hud.phase, hud.stats.kills, hud.levelInfo.level]);
+
+  // Restore a persisted cloud session (refreshes provider tokens) on mount.
+  useEffect(() => {
+    void restoreSession().then((p) => {
+      setProfile((cur) => (cur.id === p.id ? p : cur));
+      void hydrateLocalProfileFromCloud().then((hydrated) => {
+        if (hydrated) setProfile(hydrated);
+      });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  /** After any successful auth: push the doc, then merge cloud fields back. */
+  const syncProfileToCloud = useCallback((p: PlayerProfile) => {
+    void pushProfileToCloud(p);
+    void hydrateLocalProfileFromCloud().then((hydrated) => {
+      if (hydrated) setProfile(hydrated);
+    });
+  }, []);
 
   // ---------------- Auth handlers ----------------
   const handleSignInGuest = useCallback((callsign: string) => {
@@ -374,18 +528,38 @@ export default function App() {
       callsign: sanitizeCallsign(callsign || `OP-${Math.floor(1000 + Math.random() * 9000)}`),
       method: 'guest',
       backend: getBackendKind(),
+      status: 'active',
     });
     setProfile(p);
+    setAuthModalOpen(false);
+    void pushProfileToCloud(p);
   }, []);
 
-  const handleSignInEmail = useCallback((email: string, password: string) => {
+  const handleSignIn = useCallback((email: string, password: string) => {
     setAuthBusy(true);
     setAuthError('');
     signInEmail(email.trim(), password)
-      .then((p) => setProfile(p))
+      .then((p) => {
+        setProfile(p);
+        setAuthModalOpen(false);
+        syncProfileToCloud(p);
+      })
       .catch((e) => setAuthError(e instanceof Error ? e.message : 'Sign-in failed'))
       .finally(() => setAuthBusy(false));
-  }, []);
+  }, [syncProfileToCloud]);
+
+  const handleRegister = useCallback((email: string, password: string, details: RegistrationDetails) => {
+    setAuthBusy(true);
+    setAuthError('');
+    registerAccount(email.trim(), password, details)
+      .then((p) => {
+        setProfile(p);
+        setAuthModalOpen(false);
+        syncProfileToCloud(p);
+      })
+      .catch((e) => setAuthError(e instanceof Error ? e.message : 'Registration failed'))
+      .finally(() => setAuthBusy(false));
+  }, [syncProfileToCloud]);
 
   const handleSignInGoogle = useCallback(() => {
     setAuthError('');
@@ -397,7 +571,27 @@ export default function App() {
   }, []);
 
   const handleSignOut = useCallback(() => {
+    // Mark inactive in the cloud first, then drop to a local guest profile.
+    const p = profileRef.current;
+    if (p.method !== 'guest') {
+      void pushProfileToCloud({ ...p, status: 'inactive' });
+    }
+    presenceRef.current?.setManualStatus(false);
     setProfile(signOut());
+    setAuthModalOpen(false);
+    setProfilePanelOpen(false);
+  }, []);
+
+  const handleSaveProfile = useCallback((details: ProfileDetails) => {
+    const p = applyProfileDetails(details);
+    setProfile(p);
+  }, []);
+
+  const handleToggleStatus = useCallback((active: boolean) => {
+    const p = updateProfile({ status: active ? 'active' : 'inactive' });
+    setProfile(p);
+    presenceRef.current?.setManualStatus(active);
+    void pushProfileToCloud(p);
   }, []);
 
   // ---------------- Multiplayer channel ----------------
@@ -408,6 +602,7 @@ export default function App() {
       mapId: cfg.mapId as MapId,
       tier,
       level: cfg.level,
+      friendlyFire: Boolean(cfg.friendlyFire),
     };
     setMatchConfig(nextCfg);
     matchConfigRef.current = nextCfg;
@@ -417,6 +612,7 @@ export default function App() {
       level: cfg.level,
       matchMode: cfg.mode,
       tier,
+      friendlyFire: Boolean(cfg.friendlyFire),
     };
     settingsRef.current = merged;
     setSettings(merged);
@@ -425,6 +621,13 @@ export default function App() {
 
   const wireChannel = useCallback((ch: StrikeChannel) => {
     ch.onPeers((peers) => setMpPeers(peers));
+    ch.onChat((id, text, ts) => {
+      const nick = ch.getPeerList().find((p) => p.id === id)?.nickname ?? 'OPERATOR';
+      setMatchChat((prev) => [
+        ...prev.slice(-59),
+        { id: `${id}-${ts}`, fromId: id, fromName: nick, text, ts },
+      ]);
+    });
     ch.onStart((cfg) => {
       applyMatchConfig(cfg);
       engineRef.current?.deploy(false);
@@ -441,6 +644,7 @@ export default function App() {
     mpRef.current = null;
     setMpPeers([]);
     setMpRoomCode('');
+    setMatchChat([]);
     engineRef.current?.attachMultiplayer(null);
     const merged: GameSettings = { ...settingsRef.current, mode: 'solo' };
     settingsRef.current = merged;
@@ -499,6 +703,7 @@ export default function App() {
         level: matchConfigRef.current.level,
         mode: matchConfigRef.current.mode,
         tier: matchConfigRef.current.tier,
+        friendlyFire: matchConfigRef.current.friendlyFire,
       });
       engineRef.current?.resetMultiplayerScores();
     }
@@ -513,12 +718,14 @@ export default function App() {
       level: matchConfigRef.current.level,
       mode: matchConfigRef.current.mode,
       tier: matchConfigRef.current.tier,
+      friendlyFire: matchConfigRef.current.friendlyFire,
     });
     applyMatchConfig({
       mapId: matchConfigRef.current.mapId,
       level: matchConfigRef.current.level,
       mode: matchConfigRef.current.mode,
       tier: matchConfigRef.current.tier,
+      friendlyFire: matchConfigRef.current.friendlyFire,
     });
     engineRef.current?.resetMultiplayerScores();
     engineRef.current?.deploy(true);
@@ -542,7 +749,8 @@ export default function App() {
 
   const handleInvitePlayer = useCallback((player: OnlinePlayer) => {
     const ch = mpRef.current;
-    const target = player.friendCode || player.id;
+    // Prefer the uid — DB invite nodes are keyed by user id.
+    const target = player.id || player.friendCode || '';
     presenceRef.current?.sendInvite(target, ch?.roomCode ?? '', matchConfigRef.current.mode);
     ch?.sendInvite(target, ch.roomCode, matchConfigRef.current.mode);
     setLobbyNotice(`Invite sent to ${player.callsign} — share code ${ch?.roomCode ?? ''}`);
@@ -571,6 +779,7 @@ export default function App() {
         level: next.level,
         matchMode: next.mode,
         tier: next.tier,
+        friendlyFire: next.friendlyFire,
       };
       settingsRef.current = merged;
       setSettings(merged);
@@ -581,9 +790,37 @@ export default function App() {
         level: next.level,
         mode: next.mode,
         tier: next.tier,
+        friendlyFire: next.friendlyFire,
       });
       return next;
     });
+  }, []);
+
+  // ---------------- Squad role / friendly fire / bot fill ----------------
+  const handleSetSide = useCallback((side: SquadSide) => {
+    setSelfSide(side);
+    mpRef.current?.setSide(side);
+  }, []);
+
+  const handleToggleFriendlyFire = useCallback(() => {
+    handleUpdateMatchConfig({ friendlyFire: !matchConfigRef.current.friendlyFire });
+  }, [handleUpdateMatchConfig]);
+
+  const handleSimulateBots = useCallback(() => {
+    const ch = mpRef.current;
+    if (!ch?.isHost) return;
+    ch.simulateBots([
+      { nickname: 'VIPER-1', side: 'alpha' },
+      { nickname: 'VIPER-2', side: 'alpha' },
+      { nickname: 'HAVOC-1', side: 'bravo' },
+      { nickname: 'HAVOC-2', side: 'bravo' },
+    ]);
+    setLobbyNotice('Simulated squad fill active — 2v2 bots in roster');
+  }, []);
+
+  const handleClearBots = useCallback(() => {
+    mpRef.current?.clearBots();
+    setLobbyNotice('Simulated squad removed');
   }, []);
 
   const handleDeployNextLevel = useCallback(() => {
@@ -615,11 +852,27 @@ export default function App() {
       } else if (e.code === 'Tab' && hud.phase === 'playing') {
         e.preventDefault();
         setScoresOpen((open) => !open);
+      } else if (e.code === 'Enter' && hud.phase === 'playing' && !chatOpen) {
+        e.preventDefault();
+        setChatOpen(true);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [hud.phase, menuOpen, handleDeploy, handleToggleMenu, handleToggleMute]);
+  }, [hud.phase, menuOpen, chatOpen, handleDeploy, handleToggleMenu, handleToggleMute]);
+
+  // Shared voice-chat prop bag (HUD + lobby).
+  const voiceHud = {
+    enabled: voiceEnabled,
+    muted: voiceMuted,
+    status: voiceStatus,
+    level: voiceLevel,
+    peerCount: voicePeerCount,
+    onToggleMic: () => {
+      void handleToggleVoice();
+    },
+    onToggleMute: handleToggleVoiceMute,
+  };
 
   // Compose the FriendsLobby prop bag from live state.
   const lobbyProps: FriendsLobbyProps | null =
@@ -652,6 +905,14 @@ export default function App() {
           },
           onAcceptInvite: handleAcceptInvite,
           onDeclineInvite: handleDeclineInvite,
+          selfSide,
+          onSetSide: handleSetSide,
+          onToggleFriendlyFire: handleToggleFriendlyFire,
+          onSimulateBots: handleSimulateBots,
+          onClearBots: handleClearBots,
+          chatLines: lobbyChat,
+          onSendChat: handleSendLobbyChat,
+          voice: voiceHud,
         }
       : null;
 
@@ -666,6 +927,18 @@ export default function App() {
         onToggleMute={handleToggleMute}
         onPause={handlePause}
         showScores={scoresOpen}
+        chatLines={matchChat}
+        chatSelfName={profile.callsign}
+        chatOpen={chatOpen}
+        onChatOpenChange={setChatOpen}
+        onSendChat={handleSendMatchChat}
+        voice={voiceHud}
+      />
+
+      <TouchControls
+        getPlayer={() => engineRef.current?.player ?? null}
+        active={hud.phase === 'playing'}
+        vehicleActive={hud.vehicle.active}
       />
 
       <Menus
@@ -684,10 +957,19 @@ export default function App() {
         backendKind={backendKind}
         authBusy={authBusy}
         authError={authError}
+        authModalOpen={authModalOpen}
+        profilePanelOpen={profilePanelOpen}
+        onOpenAuthModal={() => setAuthModalOpen(true)}
+        onCloseAuthModal={() => setAuthModalOpen(false)}
+        onOpenProfilePanel={() => setProfilePanelOpen(true)}
+        onCloseProfilePanel={() => setProfilePanelOpen(false)}
+        onRegister={handleRegister}
+        onSignIn={handleSignIn}
         onSignInGuest={handleSignInGuest}
-        onSignInEmail={handleSignInEmail}
         onSignInGoogle={handleSignInGoogle}
         onSignOut={handleSignOut}
+        onSaveProfile={handleSaveProfile}
+        onToggleStatus={handleToggleStatus}
         onMpDeploy={handleMpDeploy}
         onDeployNextLevel={handleDeployNextLevel}
         onReplayLevel={handleReplayLevel}

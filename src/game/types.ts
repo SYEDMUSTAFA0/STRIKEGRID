@@ -5,6 +5,12 @@ export type GameMode = 'solo' | 'multi';
 /** Custom-lobby match ruleset selected by the host. */
 export type MatchModeId = 'survival' | 'tdm' | 'ffa' | 'zone_control';
 
+/**
+ * Lobby combat role: 'attack' = solo striker (everyone is a rival),
+ * 'alpha'/'bravo' = named squads that spawn and score together.
+ */
+export type SquadSide = 'attack' | 'alpha' | 'bravo';
+
 export type DifficultyTierId = 'easy' | 'medium' | 'hard';
 
 export interface LevelInfo {
@@ -34,6 +40,10 @@ export interface MultiplayerPeer {
   isHost: boolean;
   skin?: WeaponSkinId;
   status?: string;
+  /** Lobby combat role chosen before match start. */
+  side?: SquadSide;
+  /** Simulated squad member (local bot fill — no real client behind it). */
+  bot?: boolean;
 }
 
 export interface ScoreEntry {
@@ -55,6 +65,10 @@ export interface MultiplayerHudInfo {
   matchMode: MatchModeId;
   tier: DifficultyTierId;
   scores: ScoreEntry[];
+  /** This client's chosen combat role in the lobby. */
+  selfSide: SquadSide | null;
+  /** Host rule: allow damage between teammates (default off = protected). */
+  friendlyFire: boolean;
 }
 
 export type GraphicsQuality = 'high' | 'medium';
@@ -104,6 +118,8 @@ export interface GameSettings {
   matchMode: MatchModeId;
   tier: DifficultyTierId;
   level: number;
+  /** Allow fire between teammates (squad modes). Default false = protected. */
+  friendlyFire: boolean;
 }
 
 export interface WeaponSpec {

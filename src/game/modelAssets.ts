@@ -4,6 +4,15 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 const loader = new GLTFLoader();
 const templateCache = new Map<string, Promise<THREE.Object3D | null>>();
 
+// Optional external GLB/GLTF upgrades are opt-in: set VITE_EXTERNAL_MODELS=true
+// and drop the files into public/models/ to enable them. When disabled the path
+// list is empty so no asset URLs are emitted (keeps portal asset checks clean).
+const EXTERNAL_MODELS_ENABLED = import.meta.env.VITE_EXTERNAL_MODELS === 'true';
+
+export function modelPaths(...names: string[]): string[] {
+  return EXTERNAL_MODELS_ENABLED ? names.map((n) => `/models/${n}`) : [];
+}
+
 function isProbablyGlbResponse(response: Response): boolean {
   if (!response.ok) return false;
   const contentType = response.headers.get('content-type') || '';

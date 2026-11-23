@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import {
   ENEMY_SPECS,
   computeExplosionSplashDamage,
@@ -10,7 +11,7 @@ import {
   resolveCircleAABBs,
 } from './rules';
 import { ProceduralTextureLibrary } from './textures';
-import { findNamedDescendant, loadOptionalModel, normalizeModelHeight } from './modelAssets';
+import { findNamedDescendant, loadOptionalModel, modelPaths, normalizeModelHeight } from './modelAssets';
 import type { EnemyAIState, EnemyArchetype, EnemyRole, WeaponSkinId } from './types';
 import type { World } from './World';
 import type { SoundEngine } from './Audio';
@@ -109,6 +110,9 @@ interface EnemyActor {
   laserLine: THREE.Line;
   laserMat: THREE.LineBasicMaterial;
   vestMat: THREE.MeshStandardMaterial;
+  blobShadow: THREE.Mesh;
+  recoil: number;
+  flinchRoll: number;
 
   hp: number;
   maxHp: number;
@@ -135,6 +139,7 @@ interface EnemyActor {
   postYaw: number;
   lookTimer: number;
   lookTargetYaw: number;
+  losCache: boolean;
 }
 
 export class Enemies {
@@ -142,6 +147,7 @@ export class Enemies {
   private readonly hitboxMeshes: THREE.Mesh[] = [];
   private nextId = 1;
   private activeTokenCount = 0;
+  private frameIndex = 0;
 
   private readonly texLib: ProceduralTextureLibrary;
   private readonly sharedGeos: {
@@ -197,6 +203,10 @@ export class Enemies {
     thigh: THREE.CapsuleGeometry;
     shin: THREE.CapsuleGeometry;
     kneePad: THREE.ExtrudeGeometry;
+    elbowPad: THREE.SphereGeometry;
+    pec: THREE.SphereGeometry;
+    trap: THREE.CapsuleGeometry;
+    browHair: THREE.CapsuleGeometry;
     boot: THREE.ExtrudeGeometry;
     rifleBody: THREE.ExtrudeGeometry;
     rifleBarrel: THREE.LatheGeometry;
@@ -224,6 +234,7 @@ export class Enemies {
   private readonly arcticCamoTex: ReturnType<ProceduralTextureLibrary['createArcticCamoSet']>;
   private readonly carbonTex: ReturnType<ProceduralTextureLibrary['createCarbonFiberSet']>;
   private optionalHeadTemplate: THREE.Object3D | null = null;
+  private optionalBodyTemplate: THREE.Object3D | null = null;
   private optionalHeadRequest = false;
 
   constructor(
@@ -502,6 +513,10 @@ export class Enemies {
       thigh: new THREE.CapsuleGeometry(0.078, 0.28, 5, 10),
       shin: new THREE.CapsuleGeometry(0.06, 0.29, 5, 10),
       kneePad: makeCurvedArcGeo(0.045, 0.074, -0.75, 0.75, 0.088, 0.008),
+      elbowPad: new THREE.SphereGeometry(0.052, 12, 10),
+      pec: new THREE.SphereGeometry(0.062, 14, 10),
+      trap: new THREE.CapsuleGeometry(0.085, 0.16, 4, 10),
+      browHair: new THREE.CapsuleGeometry(0.0045, 0.038, 3, 6),
       boot: bootGeo,
       rifleBody: rifleBodyGeo,
       rifleBarrel: rifleBarrelGeo,
@@ -735,15 +750,75 @@ export class Enemies {
   private requestOptionalHeadAsset(): void {
     if (this.optionalHeadRequest) return;
     this.optionalHeadRequest = true;
-    void loadOptionalModel(['/models/soldier.glb', '/models/soldier_head.glb']).then((model) => {
-      if (!model) return;
-      const headNode = findNamedDescendant(model, /head|face|helmet/i);
-      if (!headNode) return;
-      this.optionalHeadTemplate = headNode;
-      for (const actor of this.actors) {
-        this.applyExternalHead(actor.headGroup);
+    // Prefer a full-body soldier GLB; fall back to a head-only asset, then to
+    // the fully procedural sculpted human when neither file is present.
+    void loadOptionalModel(modelPaths('soldier_body.glb', 'soldier.glb')).then((model) => {
+      if (model) {
+        const bodyNode = findNamedDescendant(
+          model,
+          /body|soldier(?!_head)|character|rig|hips|spine|pelvis/i,
+        );
+        let hasSkinnedMesh = false;
+        model.traverse((o) => {
+          if ((o as THREE.SkinnedMesh).isSkinnedMesh) hasSkinnedMesh = true;
+        });
+        if (bodyNode || hasSkinnedMesh) {
+          this.optionalBodyTemplate = bodyNode ?? model;
+          for (const actor of this.actors) {
+            this.applyExternalBody(actor);
+          }
+          return;
+        }
+        const headNode = findNamedDescendant(model, /head|face|helmet/i);
+        if (headNode) {
+          this.optionalHeadTemplate = headNode;
+          for (const actor of this.actors) {
+            this.applyExternalHead(actor.headGroup);
+          }
+          return;
+        }
+      }
+      void loadOptionalModel(modelPaths('soldier_head.glb')).then((headModel) => {
+        if (!headModel) return;
+        const headNode = findNamedDescendant(headModel, /head|face|helmet/i);
+        if (!headNode) return;
+        this.optionalHeadTemplate = headNode;
+        for (const actor of this.actors) {
+          this.applyExternalHead(actor.headGroup);
+        }
+      });
+    });
+  }
+
+  /** Swap the entire procedural soldier for an external GLB body when present. */
+  private applyExternalBody(actor: EnemyActor): void {
+    if (!this.optionalBodyTemplate || actor.group.userData.externalBodyApplied) return;
+    const clone = this.optionalBodyTemplate.clone(true);
+    const wrapper = normalizeModelHeight(clone, 1.8, 0.9);
+    if (!wrapper) return;
+    wrapper.userData.externalBodyApplied = true;
+
+    // Hide the procedural rig, keep the blob shadow, and retarget hitboxes
+    // onto the external mesh so shooting/damage keeps working.
+    for (const child of actor.group.children) {
+      child.visible = child.userData.isBlobShadow === true;
+    }
+    for (const part of actor.bodyParts) {
+      const idx = this.hitboxMeshes.indexOf(part);
+      if (idx >= 0) this.hitboxMeshes.splice(idx, 1);
+    }
+    actor.bodyParts.length = 0;
+    wrapper.traverse((o) => {
+      const mesh = o as THREE.Mesh;
+      if (mesh.isMesh) {
+        mesh.userData = { enemyId: actor.id, zone: 'torso' };
+        mesh.castShadow = true;
+        actor.bodyParts.push(mesh);
+        this.hitboxMeshes.push(mesh);
       }
     });
+    actor.group.add(wrapper);
+    actor.group.userData.externalBodyApplied = true;
   }
 
   private applyExternalHead(headGroup: THREE.Group): void {
@@ -795,6 +870,41 @@ export class Enemies {
     this.enemyRifleBodyMat.needsUpdate = true;
     this.enemyRifleBarrelMat.needsUpdate = true;
     this.enemyRifleMagMat.needsUpdate = true;
+  }
+
+  /**
+   * Bake every direct-child mesh sharing `material` under `parent` into a
+   * single draw call. Returns the merged mesh, or null when fewer than two
+   * parts qualify (or the geometries can't be merged).
+   */
+  private mergeStaticParts(parent: THREE.Object3D, material: THREE.Material): THREE.Mesh | null {
+    const parts: THREE.Mesh[] = [];
+    for (const child of parent.children) {
+      const m = child as THREE.Mesh;
+      if (m.isMesh && m.material === material) parts.push(m);
+    }
+    if (parts.length < 2) return null;
+
+    parent.updateWorldMatrix(true, false);
+    const parentInv = new THREE.Matrix4().copy(parent.matrixWorld).invert();
+    const geos: THREE.BufferGeometry[] = [];
+    for (const m of parts) {
+      m.updateWorldMatrix(true, false);
+      const rel = new THREE.Matrix4().multiplyMatrices(parentInv, m.matrixWorld);
+      const src = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone();
+      src.applyMatrix4(rel);
+      geos.push(src);
+    }
+    const mergedGeo = mergeGeometries(geos, false);
+    geos.forEach((g) => g.dispose());
+    if (!mergedGeo) return null;
+
+    for (const m of parts) parent.remove(m);
+    const merged = new THREE.Mesh(mergedGeo, material);
+    merged.castShadow = true;
+    merged.receiveShadow = true;
+    parent.add(merged);
+    return merged;
   }
 
   getHitboxMeshes(): THREE.Object3D[] {
@@ -861,6 +971,7 @@ export class Enemies {
   ): void {
     const spec = ENEMY_SPECS[archetype];
     const id = this.nextId++;
+    const role = getEnemyRole(archetype, id);
     const group = new THREE.Group();
     group.scale.setScalar(spec.scale);
 
@@ -887,6 +998,7 @@ export class Enemies {
 
     const shadow = new THREE.Mesh(this.sharedGeos.shadow, this.shadowMat);
     shadow.position.y = 0.015;
+    shadow.userData.isBlobShadow = true;
     group.add(shadow);
 
     // Root Pelvis Group
@@ -924,6 +1036,17 @@ export class Enemies {
       boot.position.set(0, -0.41, 0.018);
       boot.castShadow = true;
 
+      // Rushers carry extra thigh rig pouches
+      if (role === 'rusher') {
+        for (const px of [-0.055, 0.055]) {
+          const pouch = new THREE.Mesh(this.sharedGeos.magPouch, this.darkGearMat);
+          pouch.position.set(px, -0.26, 0.082);
+          pouch.scale.set(0.85, 1.15, 0.65);
+          pouch.rotation.x = 0.12;
+          hip.add(pouch);
+        }
+      }
+
       knee.add(kneeCap, pad, shin, boot);
       hip.add(hipCap, thigh, knee);
       pelvisGroup.add(hip);
@@ -943,15 +1066,35 @@ export class Enemies {
     torsoCore.scale.set(1.06, 1.0, 0.72);
     registerHitbox(torsoCore, 'torso');
 
+    // Sculpted chest: pectorals, trapezius slope, and tapered waist shading
+    const pecScale = role === 'marksman' ? 0.82 : role === 'rusher' ? 1.12 : 1.0;
+    for (const side of [-1, 1]) {
+      const pec = new THREE.Mesh(this.sharedGeos.pec, uniformMat);
+      pec.position.set(side * 0.055, 0.36, 0.1);
+      pec.scale.set(pecScale, pecScale * 0.72, pecScale * 0.5);
+      pec.rotation.z = side * -0.28;
+      pec.castShadow = true;
+      torsoPivot.add(pec);
+    }
+    const trap = new THREE.Mesh(this.sharedGeos.trap, uniformMat);
+    trap.position.set(0, 0.47, -0.01);
+    trap.rotation.z = Math.PI / 2;
+    trap.rotation.y = Math.PI / 2;
+    trap.scale.set(1.15, 1, 0.55);
+    torsoPivot.add(trap);
+
     const collar = new THREE.Mesh(this.sharedGeos.collarGuard, vestMat);
     collar.position.set(0, 0.49, 0);
 
+    const plateScale = role === 'marksman' ? 0.84 : role === 'rusher' ? 1.14 : 1.0;
     const plateFront = new THREE.Mesh(this.sharedGeos.plateFront, vestMat);
     plateFront.position.set(0, 0.28, 0.115);
+    plateFront.scale.setScalar(plateScale);
     registerHitbox(plateFront, 'torso');
 
     const plateBack = new THREE.Mesh(this.sharedGeos.plateBack, vestMat);
     plateBack.position.set(0, 0.28, -0.105);
+    plateBack.scale.setScalar(plateScale);
     registerHitbox(plateBack, 'torso');
 
     for (const px of [-0.075, 0, 0.075]) {
@@ -1159,6 +1302,25 @@ export class Enemies {
     mouth.rotation.x = Math.PI / 2 - 0.12;
     mouth.castShadow = false;
 
+    // Eyebrows for exposed faces (skipped under helmets/balaclavas)
+    if (headStyle === 'exposed') {
+      const browMat = useStubble ? this.stubbleMat : this.hairMat;
+      for (const side of [-1, 1]) {
+        const brow = addFacePart(
+          this.sharedGeos.browHair,
+          browMat,
+          side * 0.034,
+          0.152,
+          0.102,
+          0,
+          0,
+          side * -0.32,
+        );
+        brow.scale.set(1, 1, 0.7);
+        brow.castShadow = false;
+      }
+    }
+
     if (useHair) {
       const hair = addFacePart(this.sharedGeos.hairCap, this.hairMat, 0, 0.134, -0.006);
       hair.scale.set(0.98, 1.03, 0.98);
@@ -1235,9 +1397,11 @@ export class Enemies {
       return g;
     };
 
+    const pauldronScale = role === 'marksman' ? 0.78 : role === 'rusher' ? 1.18 : 1.0;
     const leftShoulder = new THREE.Group();
     leftShoulder.position.set(-0.22, 0.44, 0.01);
     const lPauldron = new THREE.Mesh(this.sharedGeos.pauldron, vestMat);
+    lPauldron.scale.setScalar(pauldronScale);
     const lUpper = new THREE.Mesh(this.sharedGeos.upperArm, uniformMat);
     lUpper.position.y = -0.14;
     registerHitbox(lUpper, 'limb');
@@ -1249,7 +1413,10 @@ export class Enemies {
     registerHitbox(lFore, 'limb');
     const lGlove = buildGlove(1);
     lGlove.position.y = -0.27;
-    leftElbow.add(lElbowCap, lFore, lGlove);
+    const lElbowPad = new THREE.Mesh(this.sharedGeos.elbowPad, this.darkGearMat);
+    lElbowPad.position.set(0, -0.01, 0.045);
+    lElbowPad.scale.set(1, 0.9, 0.75);
+    leftElbow.add(lElbowCap, lElbowPad, lFore, lGlove);
     leftShoulder.add(lPauldron, lUpper, leftElbow);
     leftShoulder.rotation.set(-0.78, -0.38, 0.15);
     leftElbow.rotation.set(-0.72, 0.25, 0);
@@ -1257,6 +1424,7 @@ export class Enemies {
     const rightShoulder = new THREE.Group();
     rightShoulder.position.set(0.22, 0.44, 0.01);
     const rPauldron = new THREE.Mesh(this.sharedGeos.pauldron, vestMat);
+    rPauldron.scale.setScalar(pauldronScale);
     const rUpper = new THREE.Mesh(this.sharedGeos.upperArm, uniformMat);
     rUpper.position.y = -0.14;
     registerHitbox(rUpper, 'limb');
@@ -1268,6 +1436,9 @@ export class Enemies {
     registerHitbox(rFore, 'limb');
     const rGlove = buildGlove(-1);
     rGlove.position.y = -0.27;
+    const rElbowPad = new THREE.Mesh(this.sharedGeos.elbowPad, this.darkGearMat);
+    rElbowPad.position.set(0, -0.01, 0.045);
+    rElbowPad.scale.set(1, 0.9, 0.75);
 
     const rifleGroup = new THREE.Group();
     rifleGroup.position.set(-0.05, -0.28, 0.14);
@@ -1281,12 +1452,50 @@ export class Enemies {
     muzzleAnchor.position.set(0, 0.012, 0.5);
     rifleGroup.add(rBody, rBarrel, rMag, muzzleAnchor);
 
-    rightElbow.add(rElbowCap, rFore, rGlove, rifleGroup);
+    rightElbow.add(rElbowCap, rElbowPad, rFore, rGlove, rifleGroup);
     rightShoulder.add(rPauldron, rUpper, rightElbow);
     rightShoulder.rotation.set(-0.92, 0.12, -0.06);
     rightElbow.rotation.set(-0.56, 0, 0);
 
     torsoPivot.add(leftShoulder, rightShoulder);
+
+    // Collapse rigid same-material clusters into single draw calls — this is
+    // the biggest FPS win with many hostiles on screen.
+    const mergedTorsoUniform = this.mergeStaticParts(torsoPivot, uniformMat);
+    const mergedTorsoVest = this.mergeStaticParts(torsoPivot, vestMat);
+    this.mergeStaticParts(torsoPivot, this.darkGearMat);
+    const mergedHeadSkin = this.mergeStaticParts(headGroup, skinMat);
+    const mergedHeadHelmet = this.mergeStaticParts(headGroup, helmetMat);
+    this.mergeStaticParts(headGroup, this.darkGearMat);
+    this.mergeStaticParts(headGroup, this.eyePupilMat);
+    const mergedHipL = this.mergeStaticParts(leftLeg.hip, uniformMat);
+    const mergedHipR = this.mergeStaticParts(rightLeg.hip, uniformMat);
+    const mergedKneeL = this.mergeStaticParts(leftLeg.knee, uniformMat);
+    const mergedKneeR = this.mergeStaticParts(rightLeg.knee, uniformMat);
+    const mergedElbowL = this.mergeStaticParts(leftElbow, uniformMat);
+    const mergedElbowR = this.mergeStaticParts(rightElbow, uniformMat);
+
+    // Drop hitboxes whose meshes were merged away, then register the merged
+    // proxies so shooting/damage coverage stays identical.
+    for (let i = bodyParts.length - 1; i >= 0; i--) {
+      if (bodyParts[i].parent === null) bodyParts.splice(i, 1);
+    }
+    const registerMerged = (mesh: THREE.Mesh | null, zone: 'head' | 'torso' | 'limb') => {
+      if (!mesh) return;
+      mesh.userData = { enemyId: id, zone };
+      bodyParts.push(mesh);
+      this.hitboxMeshes.push(mesh);
+    };
+    registerMerged(mergedTorsoUniform, 'torso');
+    registerMerged(mergedTorsoVest, 'torso');
+    registerMerged(mergedHeadSkin, 'head');
+    registerMerged(mergedHeadHelmet, 'head');
+    registerMerged(mergedHipL, 'limb');
+    registerMerged(mergedHipR, 'limb');
+    registerMerged(mergedKneeL, 'limb');
+    registerMerged(mergedKneeR, 'limb');
+    registerMerged(mergedElbowL, 'limb');
+    registerMerged(mergedElbowR, 'limb');
 
     const startY = getSurfaceFloorHeight(x, z, 1.0, ENEMY_RADIUS, this.world.obstacles, this.world.ramps);
     group.position.set(x, startY, z);
@@ -1306,7 +1515,6 @@ export class Enemies {
     laserLine.visible = false;
     this.scene.add(laserLine);
 
-    const role = getEnemyRole(archetype, id);
     this.actors.push({
       id,
       archetype,
@@ -1328,6 +1536,9 @@ export class Enemies {
       laserLine,
       laserMat,
       vestMat,
+      blobShadow: shadow,
+      recoil: 0,
+      flinchRoll: 0,
       hp: spec.maxHp,
       maxHp: spec.maxHp,
       state: 'patrol',
@@ -1352,6 +1563,7 @@ export class Enemies {
       postYaw: group.rotation.y,
       lookTimer: 1.5 + (id % 5) * 0.9,
       lookTargetYaw: 0,
+      losCache: false,
     });
   }
 
@@ -1381,6 +1593,7 @@ export class Enemies {
     actor.hp -= damage;
     actor.hitFlashTimer = 0.065;
     actor.flinchTimer = 0.22;
+    actor.flinchRoll = (Math.random() < 0.5 ? -1 : 1) * (0.14 + Math.random() * 0.26);
     actor.vestMat.emissive.setHex(0xffffff);
     actor.vestMat.emissiveIntensity = 1.2;
     actor.alertMemory = 5.0;
@@ -1472,6 +1685,7 @@ export class Enemies {
     isTitleDemo: boolean,
     onPlayerHit: (dmg: number, attackerPos: THREE.Vector3) => void,
   ): void {
+    this.frameIndex++;
     for (let i = this.actors.length - 1; i >= 0; i--) {
       const a = this.actors[i];
       const spec = ENEMY_SPECS[a.archetype];
@@ -1516,9 +1730,39 @@ export class Enemies {
         continue;
       }
 
+      // Recoil kick on the weapon arm, decaying back to the aim pose
+      a.recoil = Math.max(0, a.recoil - dt * 5.2);
+      const recoilKick = a.recoil * a.recoil * 0.55;
+      a.rightShoulder.rotation.x = THREE.MathUtils.damp(
+        a.rightShoulder.rotation.x,
+        -0.92 - recoilKick,
+        14,
+        dt,
+      );
+      a.rightElbow.rotation.x = THREE.MathUtils.damp(
+        a.rightElbow.rotation.x,
+        -0.56 - recoilKick * 0.6,
+        14,
+        dt,
+      );
+      a.leftShoulder.rotation.x = THREE.MathUtils.damp(
+        a.leftShoulder.rotation.x,
+        -0.78 - recoilKick * 0.3,
+        14,
+        dt,
+      );
+      a.leftElbow.rotation.x = THREE.MathUtils.damp(
+        a.leftElbow.rotation.x,
+        -0.72 - recoilKick * 0.3,
+        14,
+        dt,
+      );
+
       a.breathPhase += dt * 2.3;
       const breathOffset = Math.sin(a.breathPhase) * 0.025;
       const flinchPitch = a.flinchTimer > 0 ? Math.sin((a.flinchTimer / 0.22) * Math.PI) * -0.32 : 0;
+      const flinchRoll =
+        a.flinchTimer > 0 ? a.flinchRoll * Math.sin((a.flinchTimer / 0.22) * Math.PI) : 0;
 
       if (isTitleDemo) {
         this.stepPatrol(a, spec.speed * 0.7, dt);
@@ -1533,7 +1777,12 @@ export class Enemies {
         player.position.x - a.group.position.x,
         player.position.z - a.group.position.z,
       );
-      let hasLOS = distToPlayer < 48 && this.checkLineOfSight(a.group.position, player.position);
+      // Staggered LOS raycasts: each actor re-checks every 3rd frame on a
+      // rotating schedule instead of raycasting the world every frame.
+      if ((this.frameIndex + a.id) % 3 === 0) {
+        a.losCache = distToPlayer < 48 && this.checkLineOfSight(a.group.position, player.position);
+      }
+      let hasLOS = a.losCache;
       if (hasLOS && a.holdPosition && distToPlayer > 4) {
         // Sentries only visually acquire inside a forward vision cone (~150°).
         const fx = Math.sin(a.postYaw);
@@ -1603,6 +1852,7 @@ export class Enemies {
             4,
             dt,
           );
+          a.pelvisGroup.rotation.z = THREE.MathUtils.damp(a.pelvisGroup.rotation.z, 0, 6, dt);
         } else {
           a.torsoPivot.rotation.x = THREE.MathUtils.damp(a.torsoPivot.rotation.x, breathOffset + flinchPitch, 10, dt);
           a.torsoPivot.rotation.y = THREE.MathUtils.damp(a.torsoPivot.rotation.y, 0, 8, dt);
@@ -1632,8 +1882,12 @@ export class Enemies {
         a.rightKnee.rotation.x = THREE.MathUtils.damp(a.rightKnee.rotation.x, 0.1, 10, dt);
         a.torsoPivot.rotation.x = THREE.MathUtils.damp(a.torsoPivot.rotation.x, 0.08 + flinchPitch, 10, dt);
         a.torsoPivot.rotation.y = THREE.MathUtils.damp(a.torsoPivot.rotation.y, -0.18, 10, dt);
+        a.pelvisGroup.rotation.z = THREE.MathUtils.damp(a.pelvisGroup.rotation.z, 0, 8, dt);
         this.stepAttack(a, spec, player, dt, onPlayerHit);
       }
+
+      // Directional hit flinch rolls the torso away from the impact side
+      a.torsoPivot.rotation.z = THREE.MathUtils.damp(a.torsoPivot.rotation.z, flinchRoll, 12, dt);
     }
   }
 
@@ -1688,7 +1942,8 @@ export class Enemies {
 
     const vx = (_moveVec.x * advanceFactor + _strafeVec.x * strafeFactor) * roleSpeed;
     const vz = (_moveVec.z * advanceFactor + _strafeVec.z * strafeFactor) * roleSpeed;
-    this.moveWithCollision(a, vx, vz, dt);
+    const lean = -a.strafeDir * strafeFactor * 0.085;
+    this.moveWithCollision(a, vx, vz, dt, lean);
   }
 
   private stepAttack(
@@ -1735,6 +1990,7 @@ export class Enemies {
     player: Player,
     onPlayerHit: (dmg: number, attackerPos: THREE.Vector3) => void,
   ): void {
+    a.recoil = 1;
     const distToPlayer = Math.hypot(
       player.position.x - a.group.position.x,
       player.position.z - a.group.position.z,
@@ -1784,7 +2040,7 @@ export class Enemies {
     a.group.rotation.y += diff * (1 - Math.exp(-10 * dt));
   }
 
-  private moveWithCollision(a: EnemyActor, vx: number, vz: number, dt: number): void {
+  private moveWithCollision(a: EnemyActor, vx: number, vz: number, dt: number, lean = 0): void {
     const nextX = a.group.position.x + vx * dt;
     const nextZ = a.group.position.z + vz * dt;
     const prevY = a.group.position.y;
@@ -1816,6 +2072,7 @@ export class Enemies {
     }
 
     a.walkCycle += moved * 3.6;
+    a.pelvisGroup.rotation.z = THREE.MathUtils.damp(a.pelvisGroup.rotation.z, lean, 8, dt);
     const swing = Math.sin(a.walkCycle) * 0.58;
     a.leftHip.rotation.x = swing;
     a.rightHip.rotation.x = -swing;

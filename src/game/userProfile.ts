@@ -14,11 +14,12 @@ import {
   getOrCreateProfile,
   getSupabaseConfig,
   updateProfile,
+  type PlaystyleId,
   type PlayerProfile,
 } from './auth';
 import type { MapId, WeaponId } from './types';
 
-export type PlaystyleId = 'rusher' | 'marksman' | 'medic' | 'vehicle';
+export type { PlaystyleId };
 export type UserStatus = 'active' | 'inactive';
 
 export interface UserProfileDoc {
@@ -166,7 +167,7 @@ export async function pushProfileToCloud(p: PlayerProfile): Promise<void> {
       await fetch(`${cfg.url}/rest/v1/profiles`, {
         method: 'POST',
         headers: supabaseHeaders(p),
-        body: JSON.stringify({ uid: doc.uid, ...doc }),
+        body: JSON.stringify(doc),
       });
     } else if (kind === 'firebase') {
       const cfg = getFirebaseConfig();
@@ -181,6 +182,35 @@ export async function pushProfileToCloud(p: PlayerProfile): Promise<void> {
   } catch {
     // offline — local profile remains authoritative
   }
+}
+
+/**
+ * Pull the cloud profile doc for the current user and merge its editable
+ * fields into the local profile (used after sign-in / on session restore).
+ */
+export async function hydrateLocalProfileFromCloud(): Promise<PlayerProfile | null> {
+  const p = getOrCreateProfile();
+  if (p.method === 'guest') return null;
+  const doc = await fetchProfileDoc(p.id);
+  if (!doc) return null;
+  const patch: Partial<PlayerProfile> = {
+    callsign: doc.callsign || p.callsign,
+    fullName: doc.fullName,
+    bio: doc.bio,
+    country: doc.country,
+    avatarPreset: doc.avatarPreset,
+    favoriteWeapon: doc.favoriteWeapon,
+    favoriteMap: doc.favoriteMap,
+    playstyle: doc.playstyle,
+    level: Math.max(p.level, doc.level || 1),
+    kills: Math.max(p.kills, doc.kills || 0),
+    deaths: Math.max(p.deaths ?? 0, doc.deaths || 0),
+    wins: Math.max(p.wins, doc.wins || 0),
+    matchesPlayed: Math.max(p.matchesPlayed ?? 0, doc.matchesPlayed || 0),
+    friendCode: doc.friendCode || p.friendCode,
+    status: doc.status ?? p.status ?? 'active',
+  };
+  return updateProfile(patch);
 }
 
 /** Fetch a public profile document by uid (used when adding friends). */

@@ -92,19 +92,33 @@ URL Query Parameters
 
 SECTOR 09 ships with a full online layer that degrades gracefully:
 
-- **Player Sign-In** (`src/game/auth.ts`): email/password and Google sign-in via
-  **Supabase Auth** or **Firebase Auth** REST APIs (no SDK dependency), plus an
-  instant **Quick Callsign / Guest** flow persisted in `localStorage`. Every
+- **Accounts & Profiles** (`src/game/auth.ts`, `src/game/userProfile.ts`,
+  `src/components/AuthModal.tsx`, `src/components/ProfilePanel.tsx`): full
+  Register / Sign In flow (email+password, Google via Supabase OAuth) backed by
+  Supabase Auth or Firebase Auth REST, automatic session restore with token
+  refresh, and an editable Operator Profile — callsign, full name, bio,
+  country, playstyle, favorite weapon/map, tactical emblem, and career stats —
+  persisted to `/users/{uid}` (Firebase) or the `profiles` table (Supabase).
+- **Manual ACTIVE / INACTIVE status**: a toggle on the profile card and in the
+  profile panel marks the player `active` (visible in the live directory,
+  joinable, invitable) or `inactive` (stealth — hidden from matchmaking). On
+  tab close the client marks itself inactive and stale entries are pruned.
+- **Player Sign-In fallback**: an instant **Quick Callsign / Guest** flow
+  persisted in `localStorage` so play never blocks without backend keys. Every
   player gets a unique Player ID and a 6-character **Friend Code**.
 - **Live Presence** (`src/game/onlinePresence.ts`): an adapter that polls
   Supabase PostgREST (`strikegrid_players` table) or Firebase Realtime
-  Database (`/strikegrid/presence` node). Statuses: `ONLINE` / `IN LOBBY` /
-  `IN MATCH` with mode and ping.
-- **Custom Lobby** (`src/components/FriendsLobby.tsx`): friend list with
-  add-by-Friend-Code, live room invites, shareable 6-character room codes, and
-  full **host controls** — match mode (Co-op Squad Survival, Team Deathmatch,
-  Free-For-All, Zone Control), arena (all six maps), difficulty tier
-  (Easy/Medium/Hard), squad roster with ready checks, and START MATCH sync.
+  Database (`/strikegrid/presence` node). Statuses: `ACTIVE` / `IN LOBBY` /
+  `IN MATCH` / `INACTIVE` with mode, ping, and public profile fields
+  (emblem, country, level, favorite weapon).
+- **Custom Lobby** (`src/components/FriendsLobby.tsx`,
+  `src/components/ActivePlayersPanel.tsx`): live Active Players directory
+  (emblem, country, level, favorite weapon, activity) with one-click
+  **Invite to Squad** / **Join Match**, friend list with add-by-Friend-Code,
+  DB-delivered room invites with Accept/Decline, shareable 6-character room
+  codes, and full **host controls** — match mode (Co-op Squad Survival, Team
+  Deathmatch, Free-For-All, Zone Control), arena (all six maps), difficulty
+  tier (Easy/Medium/Hard), squad roster with ready checks, and START MATCH sync.
 - **In-Match Sync** (`src/game/multiplayer.ts`, `src/game/Engine.ts`): remote
   operator rigs with name tags, weapon-finish tints, death poses, pose/anim
   relay, gunfire & grenade events, live scoreboard (`Tab`), and kill feed.
@@ -128,6 +142,37 @@ Copy `.env.example` → `.env.local` and fill in ONE provider:
 #### Supabase schema (SQL editor)
 
 ```sql
+-- Operator profile documents (mirrored from the client profile).
+create table if not exists public.profiles (
+  uid text primary key,
+  callsign text not null,
+  email text,
+  full_name text default '',
+  bio text default '',
+  country text default 'OTHER',
+  avatar_preset text default 'viper',
+  favorite_weapon text default 'any',
+  favorite_map text default 'any',
+  playstyle text default 'rusher',
+  status text default 'active',
+  friend_code text,
+  level int default 1,
+  kills int default 0,
+  deaths int default 0,
+  wins int default 0,
+  matches_played int default 0,
+  created_at timestamptz default now(),
+  last_seen timestamptz default now()
+);
+alter table public.profiles enable row level security;
+-- Authenticated users may only write their own row; profiles are publicly
+-- readable so the Active Players directory can render them.
+create policy "profiles read" on public.profiles for select using (true);
+create policy "profiles insert own" on public.profiles for insert
+  with check (auth.uid()::text = uid);
+create policy "profiles update own" on public.profiles for update
+  using (auth.uid()::text = uid) with check (auth.uid()::text = uid);
+
 create table if not exists public.strikegrid_players (
   id text primary key,
   callsign text not null,
@@ -136,10 +181,15 @@ create table if not exists public.strikegrid_players (
   mode text,
   room_code text,
   ping int default 30,
+  avatar_preset text,
+  country text,
+  level int default 1,
+  favorite_weapon text,
+  full_name text,
+  playstyle text,
   last_seen timestamptz default now()
 );
 alter table public.strikegrid_players enable row level security;
--- Demo-friendly open policies (tighten for production):
 create policy "players read" on public.strikegrid_players for select using (true);
 create policy "players write" on public.strikegrid_players for all using (true) with check (true);
 
@@ -155,6 +205,31 @@ create table if not exists public.strikegrid_invites (
 alter table public.strikegrid_invites enable row level security;
 create policy "invites read" on public.strikegrid_invites for select using (true);
 create policy "invites write" on public.strikegrid_invites for all using (true) with check (true);
+
+-- Lobby-wide text chat (polled every ~2.5s).
+create table if not exists public.strikegrid_chat (
+  id bigint generated always as identity primary key,
+  from_id text,
+  from_callsign text,
+  text text not null,
+  created_at timestamptz default now()
+);
+alter table public.strikegrid_chat enable row level security;
+create policy "chat read" on public.strikegrid_chat for select using (true);
+create policy "chat write" on public.strikegrid_chat for insert with check (true);
+
+-- Voice-chat signaling relay (WebRTC SDP/ICE payloads between peers).
+create table if not exists public.strikegrid_signal (
+  id bigint generated always as identity primary key,
+  from_id text,
+  to_id text not null,
+  data jsonb,
+  created_at timestamptz default now()
+);
+alter table public.strikegrid_signal enable row level security;
+create policy "signal read own" on public.strikegrid_signal for select using (true);
+create policy "signal write" on public.strikegrid_signal for insert with check (true);
+create policy "signal delete own inbox" on public.strikegrid_signal for delete using (true);
 ```
 
 #### Firebase RTDB rules (database rules tab)
@@ -162,16 +237,52 @@ create policy "invites write" on public.strikegrid_invites for all using (true) 
 ```json
 {
   "rules": {
+    "users": {
+      "$uid": {
+        ".read": true,
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
     "strikegrid": {
       "presence": {
         ".read": true,
-        ".write": true
+        ".write": "auth != null"
+      },
+      "invites": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      },
+      "chat": {
+        ".read": "auth != null",
+        ".write": "auth != null"
+      },
+      "voice": {
+        ".read": "auth != null",
+        ".write": "auth != null"
       }
     }
   }
 }
 ```
-(Tighten `.write` to `auth != null` once email/Google auth is enabled.)
+Profile docs live at `/users/{uid}` — only the owner may write their own
+document; presence and invites require an authenticated session. For quick
+local testing you can temporarily set `.write: true` on `presence`/`invites`
+and `.read/.write: true` on `users`, but restore the rules above before
+shipping.
+
+### Chat & voice
+
+- **Lobby chat** — global text chat for every online operator, shown in the
+  multiplayer lobby panel. Works cross-device when Supabase/Firebase is
+  configured; falls back to same-browser BroadcastChannel otherwise.
+- **Match chat** — press `Enter` during a multiplayer match to message your
+  room squad (BroadcastChannel room transport).
+- **Voice chat** — mic toggle in the HUD (top-right) or lobby comms panel.
+  WebRTC mesh audio between online players, relayed via the presence
+  backend's signaling channel (`strikegrid_signal` table / `/strikegrid/voice`
+  RTDB node / BroadcastChannel). Capped at 6 simultaneous peers; non-trickle
+  ICE keeps call setup reliable over REST polling (~1–4s to connect).
+  Microphone permission is required; voice is OFF by default.
 
 ### Testing multiplayer locally
 

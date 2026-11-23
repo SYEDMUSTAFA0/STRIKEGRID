@@ -14,9 +14,11 @@
  */
 
 import { cgSetItem } from './crazygames';
+import type { MapId, WeaponId } from './types';
 
 export type AuthMethod = 'guest' | 'email' | 'google' | 'firebase' | 'supabase';
 export type BackendKind = 'none' | 'supabase' | 'firebase';
+export type PlaystyleId = 'rusher' | 'marksman' | 'medic' | 'vehicle';
 
 export interface PlayerProfile {
   /** Unique player id — provider uid when signed in, local id for guests. */
@@ -37,9 +39,9 @@ export interface PlayerProfile {
   bio?: string;
   country?: string;
   avatarPreset?: string;
-  favoriteWeapon?: string;
-  favoriteMap?: string;
-  playstyle?: string;
+  favoriteWeapon?: WeaponId | 'any';
+  favoriteMap?: MapId | 'any';
+  playstyle?: PlaystyleId;
   level: number;
   kills: number;
   deaths: number;
@@ -445,9 +447,9 @@ export interface RegistrationDetails {
   bio?: string;
   country?: string;
   avatarPreset?: string;
-  favoriteWeapon?: string;
-  favoriteMap?: string;
-  playstyle?: string;
+  favoriteWeapon?: WeaponId | 'any';
+  favoriteMap?: MapId | 'any';
+  playstyle?: PlaystyleId;
 }
 
 /**

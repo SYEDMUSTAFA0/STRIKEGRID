@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { MatchModeId, DifficultyTierId, WeaponSkinId } from './types';
+import type { MatchModeId, DifficultyTierId, SquadSide, WeaponSkinId } from './types';
 
 /**
  * Lightweight browser multiplayer layer.
@@ -18,6 +18,10 @@ export interface MpPeerInfo {
   lastSeen: number;
   skin?: WeaponSkinId;
   status?: string;
+  /** Lobby combat role: solo striker or named squad. */
+  side?: SquadSide;
+  /** Simulated squad member injected by the host (no real client). */
+  bot?: boolean;
 }
 
 export interface MpPose {
@@ -37,6 +41,8 @@ export interface MpMatchConfig {
   level: number;
   mode: MatchModeId;
   tier: DifficultyTierId;
+  /** Allow damage between teammates (default off = squad protection). */
+  friendlyFire?: boolean;
 }
 
 export interface MpScore {
@@ -90,6 +96,8 @@ interface WireMessage {
   score?: MpScore;
   invite?: { to: string; roomCode: string; mode?: MatchModeId };
   skin?: WeaponSkinId;
+  side?: SquadSide;
+  bot?: boolean;
   ts: number;
 }
 
@@ -125,6 +133,7 @@ export class StrikeChannel {
   private peers = new Map<string, MpPeerInfo>();
   private ready = false;
   private skin: WeaponSkinId = 'standard';
+  private side: SquadSide = 'attack';
   private heartbeatTimer: number | null = null;
   private pruneTimer: number | null = null;
   private disposed = false;
@@ -156,7 +165,10 @@ export class StrikeChannel {
 
     this.send({ t: 'hello', ready: this.ready });
     this.heartbeatTimer = window.setInterval(() => {
-      if (!this.disposed) this.send({ t: 'hello', ready: this.ready });
+      if (this.disposed) return;
+      this.send({ t: 'hello', ready: this.ready });
+      // Keep simulated squad members alive on remote clients.
+      for (const bot of this.botPeers()) this.announceBot(bot);
     }, HEARTBEAT_MS);
     this.pruneTimer = window.setInterval(() => this.prunePeers(), PEER_TIMEOUT_MS);
   }
@@ -171,6 +183,86 @@ export class StrikeChannel {
 
   get isReady(): boolean {
     return this.ready;
+  }
+
+  /** This client's chosen lobby combat role (attack / alpha / bravo). */
+  get selfSide(): SquadSide {
+    return this.side;
+  }
+
+  /** Pick a combat role before match start — synced to the whole room. */
+  setSide(side: SquadSide): void {
+    this.side = side;
+    this.send({ t: 'hello', ready: this.ready, side });
+    this.emitPeers();
+  }
+
+  /**
+   * Host-only: inject simulated squad members into the room roster so the
+   * lobby/team-up flow can be tested with zero real players. Bots are
+   * re-announced on every heartbeat so remote clients never prune them, and
+   * each client renders them as wandering remote operators locally.
+   */
+  simulateBots(bots: ReadonlyArray<{ nickname: string; side: SquadSide }>): void {
+    if (!this.isHost || !this.bc || this.disposed) return;
+    for (const b of bots.slice(0, 6)) {
+      const id = `BOT-${Math.random().toString(36).slice(2, 7).toUpperCase()}`;
+      const peer: MpPeerInfo = {
+        id,
+        nickname: b.nickname.slice(0, 12).toUpperCase(),
+        ready: true,
+        isHost: false,
+        lastSeen: Date.now(),
+        side: b.side,
+        bot: true,
+      };
+      this.peers.set(id, peer);
+      this.announceBot(peer);
+    }
+    this.emitPeers();
+  }
+
+  /** Host-only: remove all simulated squad members from the room. */
+  clearBots(): void {
+    if (!this.isHost) return;
+    for (const [id, p] of this.peers) {
+      if (!p.bot) continue;
+      this.peers.delete(id);
+      this.sendAs(id, { t: 'bye' });
+    }
+    this.emitPeers();
+  }
+
+  private botPeers(): MpPeerInfo[] {
+    return [...this.peers.values()].filter((p) => p.bot);
+  }
+
+  /** Post a wire message impersonating a bot id (roster announcements). */
+  private sendAs(id: string, partial: Partial<WireMessage>): void {
+    if (!this.bc || this.disposed) return;
+    const msg: WireMessage = {
+      t: 'hello',
+      room: this.roomCode,
+      id,
+      nick: 'BOT',
+      ts: Date.now(),
+      ...partial,
+    };
+    try {
+      this.bc.postMessage(msg);
+    } catch {
+      // ignore
+    }
+  }
+
+  private announceBot(p: MpPeerInfo): void {
+    this.sendAs(p.id, {
+      t: 'hello',
+      nick: p.nickname,
+      ready: p.ready,
+      side: p.side,
+      bot: true,
+    });
   }
 
   getPeerList(): MpPeerInfo[] {
@@ -218,6 +310,20 @@ export class StrikeChannel {
     this.send({ t: 'invite', invite: { to, roomCode, mode } });
   }
 
+  /** Broadcast a text-chat line to the whole room (lobby + in-match). */
+  sendChat(text: string): void {
+    const body = text.trim().slice(0, 280);
+    if (!body) return;
+    this.broadcastEvent({ k: 'chat', text: body });
+  }
+
+  /** Subscribe to room text chat (filters the generic event stream). */
+  onChat(cb: (id: string, text: string, ts: number) => void): () => void {
+    return this.onEvent((id, event) => {
+      if (event.k === 'chat' && event.text) cb(id, event.text, event.ts);
+    });
+  }
+
   onEvent(cb: EventListener): () => void {
     this.eventListeners.add(cb);
     return () => this.eventListeners.delete(cb);
@@ -258,6 +364,7 @@ export class StrikeChannel {
     if (this.disposed) return;
     this.disposed = true;
     this.send({ t: 'bye' });
+    for (const bot of this.botPeers()) this.sendAs(bot.id, { t: 'bye' });
     if (this.heartbeatTimer !== null) window.clearInterval(this.heartbeatTimer);
     if (this.pruneTimer !== null) window.clearInterval(this.pruneTimer);
     try {
@@ -284,6 +391,7 @@ export class StrikeChannel {
       id: this.selfId,
       nick: this.nickname,
       skin: this.skin,
+      side: this.side,
       ts: Date.now(),
       ...partial,
     };
@@ -303,6 +411,8 @@ export class StrikeChannel {
         const existing = this.peers.get(msg.id);
         const wasNew = !existing;
         const peerSkin = msg.skin || existing?.skin;
+        const peerSide = msg.side || existing?.side;
+        const peerBot = Boolean(msg.bot) || existing?.bot === true;
         this.peers.set(msg.id, {
           id: msg.id,
           nickname: msg.nick || 'OPERATOR',
@@ -310,12 +420,16 @@ export class StrikeChannel {
           isHost: msg.id.startsWith('H-'),
           lastSeen: now,
           skin: peerSkin,
+          side: peerSide,
+          bot: peerBot || undefined,
         });
         if (
           wasNew ||
           existing?.ready !== Boolean(msg.ready) ||
           existing?.nickname !== (msg.nick || 'OPERATOR') ||
-          existing?.skin !== peerSkin
+          existing?.skin !== peerSkin ||
+          existing?.side !== peerSide ||
+          Boolean(existing?.bot) !== peerBot
         ) {
           this.emitPeers();
         }
@@ -406,6 +520,7 @@ export class StrikeChannel {
     const now = Date.now();
     let changed = false;
     for (const [id, p] of this.peers) {
+      if (p.bot) continue; // bots are re-announced by the host heartbeat
       if (now - p.lastSeen > PEER_TIMEOUT_MS) {
         this.peers.delete(id);
         changed = true;
@@ -431,7 +546,21 @@ export interface RemoteOperatorEntry {
   id: string;
   nickname?: string;
   skin?: WeaponSkinId;
+  side?: SquadSide;
 }
+
+/** Squad-role tints — override skin/palette colors for team identification. */
+const TEAM_TINTS: Record<SquadSide, number> = {
+  alpha: 0xf59e0b,
+  bravo: 0x38bdf8,
+  attack: 0xf87171,
+};
+
+const TEAM_TAGS: Record<SquadSide, string> = {
+  alpha: '[A] ',
+  bravo: '[B] ',
+  attack: '[X] ',
+};
 
 /** WEAPON_SKIN accent colors reused as remote-operator team tints. */
 const SKIN_TINTS: Record<string, number> = {
@@ -471,7 +600,13 @@ function cssForHex(hex: number): string {
 export class RemoteOperators {
   private readonly rigs = new Map<
     string,
-    { group: THREE.Group; mats: THREE.MeshStandardMaterial[]; sprite?: THREE.Sprite; dead: boolean }
+    {
+      group: THREE.Group;
+      mats: THREE.MeshStandardMaterial[];
+      sprite?: THREE.Sprite;
+      dead: boolean;
+      side?: SquadSide;
+    }
   >();
   private readonly scene: THREE.Scene;
   private readonly palette = [0x38bdf8, 0xf59e0b, 0xa78bfa, 0x34d399, 0xf472b6, 0xfacc15];
@@ -504,7 +639,11 @@ export class RemoteOperators {
     for (const [id, entry] of wanted) {
       const existing = this.rigs.get(id);
       if (!existing) {
-        const color = entry.skin ? (SKIN_TINTS[entry.skin] ?? this.palette[i % this.palette.length]) : this.palette[i % this.palette.length];
+        const color = entry.side
+          ? TEAM_TINTS[entry.side]
+          : entry.skin
+            ? (SKIN_TINTS[entry.skin] ?? this.palette[i % this.palette.length])
+            : this.palette[i % this.palette.length];
         i++;
         const bodyMat = new THREE.MeshStandardMaterial({
           color,
@@ -522,16 +661,39 @@ export class RemoteOperators {
         group.add(body, head);
         let sprite: THREE.Sprite | undefined;
         if (entry.nickname) {
-          sprite = makeNameSprite(entry.nickname, cssForHex(color));
+          const tag = entry.side ? TEAM_TAGS[entry.side] : '';
+          sprite = makeNameSprite(`${tag}${entry.nickname}`, cssForHex(color));
           group.add(sprite);
         }
         this.scene.add(group);
-        this.rigs.set(id, { group, mats: [bodyMat, darkMat], sprite, dead: false });
-      } else if (entry.nickname && !existing.sprite) {
-        const color = this.palette[0];
-        const sprite = makeNameSprite(entry.nickname, cssForHex(color));
-        existing.group.add(sprite);
-        existing.sprite = sprite;
+        this.rigs.set(id, { group, mats: [bodyMat, darkMat], sprite, dead: false, side: entry.side });
+      } else {
+        // Squad reassignment mid-lobby: recolor rig + rebuild name tag.
+        if (entry.side !== existing.side) {
+          existing.side = entry.side;
+          const color = entry.side
+            ? TEAM_TINTS[entry.side]
+            : this.palette[0];
+          const bodyMat = existing.mats[0];
+          bodyMat.color.setHex(color);
+          bodyMat.emissive.setHex(color);
+          if (existing.sprite && entry.nickname) {
+            const tag = entry.side ? TEAM_TAGS[entry.side] : '';
+            const fresh = makeNameSprite(`${tag}${entry.nickname}`, cssForHex(color));
+            fresh.position.copy(existing.sprite.position);
+            existing.group.remove(existing.sprite);
+            existing.sprite.material.map?.dispose();
+            existing.sprite.material.dispose();
+            existing.group.add(fresh);
+            existing.sprite = fresh;
+          }
+        } else if (entry.nickname && !existing.sprite) {
+          const color = existing.side ? TEAM_TINTS[existing.side] : this.palette[0];
+          const tag = existing.side ? TEAM_TAGS[existing.side] : '';
+          const sprite = makeNameSprite(`${tag}${entry.nickname}`, cssForHex(color));
+          existing.group.add(sprite);
+          existing.sprite = sprite;
+        }
       }
     }
   }

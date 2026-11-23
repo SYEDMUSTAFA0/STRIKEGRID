@@ -7,11 +7,14 @@ import {
   calculateAccuracyPercent,
   getLevelConfig,
 } from '../game/rules';
-import { Crosshair, Play, User, Users } from 'lucide-react';
+import { Crosshair, Menu, Play, User, Users } from 'lucide-react';
 import { useState, type ReactNode } from 'react';
 import { FriendsLobby } from './FriendsLobby';
 import type { FriendsLobbyProps } from './FriendsLobby';
-import type { BackendKind, PlayerProfile } from '../game/auth';
+import { AuthModal } from './AuthModal';
+import { ProfilePanel } from './ProfilePanel';
+import { avatarPreset, defaultProfileDetails, type ProfileDetails } from '../game/userProfile';
+import type { BackendKind, PlayerProfile, RegistrationDetails } from '../game/auth';
 import type {
   GameSettings,
   GraphicsQuality,
@@ -37,10 +40,19 @@ interface MenusProps {
   backendKind: BackendKind;
   authBusy: boolean;
   authError: string;
+  authModalOpen: boolean;
+  profilePanelOpen: boolean;
+  onOpenAuthModal: () => void;
+  onCloseAuthModal: () => void;
+  onOpenProfilePanel: () => void;
+  onCloseProfilePanel: () => void;
+  onRegister: (email: string, password: string, details: RegistrationDetails) => void;
+  onSignIn: (email: string, password: string) => void;
   onSignInGuest: (callsign: string) => void;
-  onSignInEmail: (email: string, password: string) => void;
   onSignInGoogle: () => void;
   onSignOut: () => void;
+  onSaveProfile: (details: ProfileDetails) => void;
+  onToggleStatus: (active: boolean) => void;
   onMpDeploy: () => void;
   onDeployNextLevel: () => void;
   onReplayLevel: () => void;
@@ -95,8 +107,11 @@ function StatBar({ label, value, max, display }: { label: string; value: number;
         <span>{label}</span>
         <span className="tabular-nums text-stone-200">{display}</span>
       </div>
-      <div className="h-1 bg-stone-800/80 overflow-hidden">
-        <div className="h-full bg-amber-500/80" style={{ width: `${pct}%` }} />
+      <div className="h-1 rounded-full bg-stone-800/80 overflow-hidden">
+        <div
+          className="h-full rounded-full bg-gradient-to-r from-amber-600 via-amber-500 to-amber-300"
+          style={{ width: `${pct}%` }}
+        />
       </div>
     </div>
   );
@@ -104,8 +119,8 @@ function StatBar({ label, value, max, display }: { label: string; value: number;
 
 function SectionLabel({ children }: { children: ReactNode }) {
   return (
-    <div className="flex items-center gap-2 text-[10px] uppercase tracking-[0.22em] text-stone-400">
-      <span className="w-1.5 h-1.5 bg-amber-500" />
+    <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[0.24em] text-stone-300">
+      <span className="w-1 h-3.5 rounded-full bg-gradient-to-b from-amber-400 to-amber-600" />
       {children}
     </div>
   );
@@ -127,19 +142,26 @@ export function Menus({
   backendKind,
   authBusy,
   authError,
+  authModalOpen,
+  profilePanelOpen,
+  onOpenAuthModal,
+  onCloseAuthModal,
+  onOpenProfilePanel,
+  onCloseProfilePanel,
+  onRegister,
+  onSignIn,
   onSignInGuest,
-  onSignInEmail,
   onSignInGoogle,
   onSignOut,
+  onSaveProfile,
+  onToggleStatus,
   onMpDeploy,
   onDeployNextLevel,
   onReplayLevel,
 }: MenusProps) {
-  const [guestName, setGuestName] = useState('');
-  const [authEmail, setAuthEmail] = useState('');
-  const [authPass, setAuthPass] = useState('');
-  const [copiedId, setCopiedId] = useState(false);
   const inMultiplayer = settings.mode === 'multi';
+  const isActive = profile.status !== 'inactive';
+  const emblem = avatarPreset(profile.avatarPreset);
   if (hud.phase === 'title' && !menuOpen) {
     return (
       <div className="fixed inset-0 z-20 pointer-events-none font-mono text-stone-100">
@@ -148,16 +170,17 @@ export function Menus({
           <button
             type="button"
             onClick={onToggleMenu}
-            className="pointer-events-auto flex items-center gap-2 border border-amber-500/60 bg-[#0b0f16]/85 px-3 py-1.5 text-amber-400 hover:bg-amber-500 hover:text-stone-950 transition-colors cursor-pointer"
+            title="Menu Hidden · Press ESC"
+            aria-label="Show menu"
+            className="pointer-events-auto flex items-center justify-center rounded-md border border-amber-500/50 bg-[#0b0f16]/85 backdrop-blur-sm w-9 h-9 text-amber-400 hover:bg-amber-500 hover:text-stone-950 transition-colors cursor-pointer"
           >
-            <span className="w-1.5 h-1.5 bg-current tac-blink" />
-            Menu Hidden · Press ESC
+            <Menu className="w-4.5 h-4.5" />
           </button>
         </div>
         <button
           type="button"
           onClick={onDeploy}
-          className="pointer-events-auto absolute bottom-6 right-6 border border-stone-700 bg-[#0b0f16]/85 px-4 py-2 text-[11px] tracking-[0.24em] uppercase text-stone-200 hover:border-amber-500 hover:text-amber-400 transition-colors cursor-pointer"
+          className="pointer-events-auto absolute bottom-6 right-6 rounded-md border border-stone-700 bg-[#0b0f16]/85 backdrop-blur-sm px-4 py-2 text-[11px] tracking-[0.24em] uppercase text-stone-200 hover:border-amber-500/70 hover:text-amber-400 transition-colors cursor-pointer"
         >
           Deploy [Enter]
         </button>
@@ -172,20 +195,23 @@ export function Menus({
 
     return (
       <div className="fixed inset-0 z-20 pointer-events-none font-mono text-stone-100">
-        {/* Tactical backdrop: grid, scanlines, vignette */}
+        {/* Tactical backdrop: grid, scanlines, vignette, ambient glow */}
         <div className="absolute inset-0 tac-grid" />
         <div className="absolute inset-0 tac-scanlines opacity-40" />
         <div className="absolute inset-0 bg-gradient-to-r from-[#070a0f]/95 via-[#070a0f]/70 to-[#070a0f]/25" />
-        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_50%,rgba(0,0,0,0.55)_100%)]" />
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_55%_45%_at_28%_38%,rgba(245,158,11,0.08),transparent_70%)]" />
+        <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,transparent_50%,rgba(0,0,0,0.6)_100%)]" />
 
-        <div className="relative h-full flex flex-col justify-between p-5 md:p-9">
+        <div className="relative h-full flex flex-col p-4 sm:p-6 md:p-9">
+          {/* Scrollable console area — panel scrolls, footer stays pinned */}
+          <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar flex tac-fade-up">
           {/* Deployment console panel */}
-          <div className="relative w-full max-w-[560px] bg-[#0b0f16]/95 backdrop-blur-sm border border-stone-800/90 p-5 md:p-6 shadow-[0_0_60px_rgba(0,0,0,0.6)] pointer-events-auto tac-fade-up">
+          <div className="relative w-full max-w-[560px] m-auto bg-[#0d1117]/95 backdrop-blur-md rounded-lg border border-stone-700/60 border-t-stone-600/80 p-4 sm:p-6 shadow-[0_24px_70px_rgba(0,0,0,0.65),0_0_50px_rgba(245,158,11,0.05)] pointer-events-auto">
 
             {/* Header lockup + live status cluster */}
             <div className="flex items-start justify-between gap-4 mb-5">
               <div className="flex items-center gap-3.5">
-                <svg viewBox="0 0 48 48" className="w-11 h-11 shrink-0 drop-shadow-[0_0_10px_rgba(245,158,11,0.35)]" aria-hidden="true">
+                <svg viewBox="0 0 48 48" className="w-12 h-12 shrink-0 drop-shadow-[0_0_14px_rgba(245,158,11,0.4)]" aria-hidden="true">
                   <polygon
                     points="24,3 44,14 44,34 24,45 4,34 4,14"
                     fill="#161c26"
@@ -200,10 +226,10 @@ export function Menus({
                   <circle cx="24" cy="24" r="2.2" fill="#f59e0b" />
                 </svg>
                 <div>
-                  <h1 className="text-3xl font-bold tracking-[0.14em] text-stone-100 leading-none">
-                    SECTOR <span className="text-amber-500">09</span>
+                  <h1 className="text-3xl sm:text-4xl font-black tracking-[0.12em] text-stone-100 leading-none">
+                    SECTOR <span className="bg-gradient-to-b from-amber-300 to-amber-600 bg-clip-text text-transparent">09</span>
                   </h1>
-                  <p className="text-[10px] tracking-[0.28em] text-stone-400 uppercase mt-1.5">
+                  <p className="text-[10px] font-medium tracking-[0.32em] text-stone-500 uppercase mt-2">
                     Tactical FPS · Wave Ops
                   </p>
                 </div>
@@ -218,143 +244,124 @@ export function Menus({
               </div>
             </div>
 
-            {/* Operator sign-in / player card */}
+            {/* Operator card + access */}
             <div className="mb-5 border-t border-stone-800/70 pt-4">
               <div className="flex items-center justify-between mb-2">
-                <SectionLabel>Operator Sign-In</SectionLabel>
+                <SectionLabel>Operator</SectionLabel>
                 <span
                   className={`flex items-center gap-1 text-[9px] tracking-[0.18em] uppercase ${
                     backendKind === 'none' ? 'text-amber-400' : 'text-emerald-400'
                   }`}
                 >
                   <span className="w-1.5 h-1.5 rounded-full bg-current tac-blink" />
-                  {profile.method === 'guest' ? 'Guest' : profile.method.toUpperCase()}
+                  {backendKind === 'none' ? 'Offline' : backendKind.toUpperCase()}
                 </span>
               </div>
 
               {/* Player card */}
-              <div className="flex items-center justify-between gap-3 border border-stone-800/70 bg-[#10151d] px-2.5 py-2 mb-2.5">
-                <div className="min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[13px] font-bold tracking-[0.14em] text-stone-100 uppercase truncate">
-                      {profile.callsign}
-                    </span>
-                    <span className="px-1.5 py-px border border-emerald-800 text-emerald-400 text-[8.5px] tracking-[0.16em] uppercase">
-                      Online
-                    </span>
-                  </div>
-                  <div className="text-[9px] tracking-[0.16em] uppercase text-stone-500 mt-0.5">
-                    LV {profile.level} · RANK {profile.level >= 20 ? 'VETERAN' : profile.level >= 10 ? 'OPERATIVE' : 'RECRUIT'} ·{' '}
-                    {profile.kills} kills · {profile.wins} wins
+              <div className="flex items-center justify-between gap-3 rounded-md border border-stone-700/60 bg-[#11161f]/80 px-3 py-2.5 mb-2.5">
+                <div className="min-w-0 flex items-center gap-2.5">
+                  <span
+                    className="inline-flex items-center justify-center w-9 h-9 text-base font-bold shrink-0"
+                    style={{
+                      background: `${emblem.color}22`,
+                      color: emblem.color,
+                      clipPath: 'polygon(50% 0%, 100% 25%, 100% 75%, 50% 100%, 0% 75%, 0% 25%)',
+                    }}
+                  >
+                    {emblem.glyph}
+                  </span>
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[13px] font-bold tracking-[0.14em] text-stone-100 uppercase truncate">
+                        {profile.callsign}
+                      </span>
+                      <span
+                        className={`px-1.5 py-px border text-[8.5px] tracking-[0.16em] uppercase ${
+                          isActive
+                            ? 'border-emerald-800 text-emerald-400'
+                            : 'border-stone-700 text-stone-500'
+                        }`}
+                      >
+                        {isActive ? 'Active' : 'Inactive'}
+                      </span>
+                    </div>
+                    <div className="text-[9px] tracking-[0.16em] uppercase text-stone-500 mt-0.5">
+                      {profile.method === 'guest' ? 'Guest' : profile.method.toUpperCase()} · LV {profile.level} ·{' '}
+                      {profile.kills} kills · {profile.wins} wins
+                    </div>
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={() => {
                     navigator.clipboard?.writeText(profile.friendCode).catch(() => {});
-                    setCopiedId(true);
-                    window.setTimeout(() => setCopiedId(false), 1400);
                   }}
                   title="Copy Friend Code / Player ID"
-                  className="shrink-0 flex flex-col items-end gap-0.5 border border-stone-700 bg-[#141923] hover:border-amber-500 px-2 py-1 cursor-pointer"
+                  className="shrink-0 flex flex-col items-end gap-0.5 rounded-md border border-stone-700/70 bg-[#141923] hover:border-amber-500/70 px-2.5 py-1.5 cursor-pointer transition-colors"
                 >
                   <span className="text-[8px] tracking-[0.2em] uppercase text-stone-500">Friend Code</span>
                   <span className="text-[12px] font-bold tracking-[0.24em] text-amber-300">
                     {profile.friendCode}
                   </span>
                   <span className="text-[8px] tracking-[0.14em] uppercase text-stone-500">
-                    ID {profile.id.slice(0, 10)} {copiedId ? '· COPIED' : ''}
+                    ID {profile.id.slice(0, 10)}
                   </span>
                 </button>
               </div>
 
-              {/* Quick Callsign (always available — instant guest play) */}
-              <div className="flex gap-1.5 mb-2">
-                <input
-                  type="text"
-                  value={guestName}
-                  onChange={(e) => setGuestName(e.target.value.slice(0, 12))}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && guestName.trim()) onSignInGuest(guestName);
-                  }}
-                  placeholder="CALLSIGN"
-                  className="flex-1 bg-[#10151d] border border-stone-800 px-2.5 py-1.5 text-[11px] tracking-[0.2em] uppercase text-stone-100 placeholder:text-stone-600 focus:border-amber-500 outline-none"
-                />
+              <div className="flex gap-1.5">
                 <button
                   type="button"
-                  data-auth="guest"
-                  onClick={() => onSignInGuest(guestName)}
-                  className="px-3 py-1.5 bg-[#1a2230] hover:bg-[#232f42] border border-stone-700 text-stone-200 text-[10px] tracking-[0.16em] uppercase cursor-pointer"
+                  data-auth="open"
+                  onClick={onOpenAuthModal}
+                  className="flex-1 py-2 rounded-md bg-gradient-to-b from-[#1c2534] to-[#161d29] hover:from-[#232f42] hover:to-[#1a2230] border border-stone-700/70 text-stone-200 text-[10px] font-medium tracking-[0.16em] uppercase cursor-pointer transition-all"
                 >
-                  Quick Play
+                  {profile.method === 'guest' ? 'Sign In / Register' : 'Switch Account'}
                 </button>
+                <button
+                  type="button"
+                  data-profile="open"
+                  onClick={onOpenProfilePanel}
+                  className="flex-1 py-2 rounded-md bg-gradient-to-b from-[#1c2534] to-[#161d29] hover:from-[#232f42] hover:to-[#1a2230] border border-stone-700/70 text-stone-200 text-[10px] font-medium tracking-[0.16em] uppercase cursor-pointer transition-all"
+                >
+                  Operator Profile
+                </button>
+                {profile.method !== 'guest' && (
+                  <button
+                    type="button"
+                    onClick={onSignOut}
+                    className="px-3 py-2 rounded-md border border-stone-800 text-stone-500 hover:text-red-300 hover:border-red-900/60 text-[10px] tracking-[0.16em] uppercase cursor-pointer transition-colors"
+                  >
+                    Sign Out
+                  </button>
+                )}
               </div>
-
-              {/* Email / password + Google (backend-gated) */}
-              {backendKind !== 'none' ? (
-                <div className="space-y-1.5">
-                  <div className="flex gap-1.5">
-                    <input
-                      type="email"
-                      value={authEmail}
-                      onChange={(e) => setAuthEmail(e.target.value)}
-                      placeholder="EMAIL"
-                      className="flex-1 bg-[#10151d] border border-stone-800 px-2.5 py-1.5 text-[11px] tracking-[0.1em] text-stone-100 placeholder:text-stone-600 focus:border-amber-500 outline-none"
-                    />
-                    <input
-                      type="password"
-                      value={authPass}
-                      onChange={(e) => setAuthPass(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && authEmail && authPass) onSignInEmail(authEmail, authPass);
-                      }}
-                      placeholder="PASSWORD"
-                      className="flex-1 bg-[#10151d] border border-stone-800 px-2.5 py-1.5 text-[11px] tracking-[0.1em] text-stone-100 placeholder:text-stone-600 focus:border-amber-500 outline-none"
-                    />
-                  </div>
-                  <div className="flex gap-1.5">
-                    <button
-                      type="button"
-                      data-auth="email"
-                      disabled={authBusy || !authEmail || !authPass}
-                      onClick={() => onSignInEmail(authEmail, authPass)}
-                      className="flex-1 py-1.5 bg-[#1a2230] hover:bg-[#232f42] disabled:opacity-40 border border-stone-700 text-stone-200 text-[10px] tracking-[0.16em] uppercase cursor-pointer"
-                    >
-                      {authBusy ? 'AUTH…' : 'Email Sign-In'}
-                    </button>
-                    {backendKind === 'supabase' && (
-                      <button
-                        type="button"
-                        data-auth="google"
-                        disabled={authBusy}
-                        onClick={onSignInGoogle}
-                        className="flex-1 py-1.5 bg-[#1a2230] hover:bg-[#232f42] disabled:opacity-40 border border-stone-700 text-stone-200 text-[10px] tracking-[0.16em] uppercase cursor-pointer"
-                      >
-                        Google
-                      </button>
-                    )}
-                  </div>
-                  {profile.method !== 'guest' && (
-                    <button
-                      type="button"
-                      onClick={onSignOut}
-                      className="w-full py-1 text-[9.5px] tracking-[0.16em] uppercase text-stone-500 hover:text-red-300 cursor-pointer"
-                    >
-                      Sign out to guest
-                    </button>
-                  )}
-                </div>
-              ) : (
-                <div className="text-[9.5px] tracking-[0.14em] uppercase text-stone-500 leading-snug">
-                  Live sign-in disabled — set{' '}
-                  <span className="text-stone-300">VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY</span> or{' '}
-                  <span className="text-stone-300">VITE_FIREBASE_API_KEY</span> to enable email &amp; Google auth.
-                </div>
-              )}
               {authError && (
                 <div className="mt-1.5 text-[9.5px] tracking-[0.12em] uppercase text-red-400">{authError}</div>
               )}
             </div>
+
+            {/* Access modals */}
+            <AuthModal
+              open={authModalOpen}
+              backendKind={backendKind}
+              busy={authBusy}
+              error={authError}
+              onClose={onCloseAuthModal}
+              onGuest={onSignInGuest}
+              onRegister={onRegister}
+              onSignIn={onSignIn}
+              onGoogle={onSignInGoogle}
+            />
+            <ProfilePanel
+              open={profilePanelOpen}
+              profile={profile}
+              busy={authBusy}
+              onClose={onCloseProfilePanel}
+              onSave={onSaveProfile}
+              onToggleStatus={onToggleStatus}
+            />
 
             {/* Mission brief strip */}
             <div className="mb-5 border-t border-stone-800/70 pt-4">
@@ -371,7 +378,7 @@ export function Menus({
                 {MISSION_ZONES.map((z) => (
                   <div
                     key={z.code}
-                    className="border border-stone-800/70 bg-[#10151d] px-1.5 py-1 text-center"
+                    className="rounded-md border border-stone-800/70 bg-[#11161f]/70 px-1.5 py-1.5 text-center"
                   >
                     <div className="text-[8.5px] tracking-[0.14em] uppercase" style={{ color: z.accent }}>
                       {z.code}
@@ -387,7 +394,7 @@ export function Menus({
             {/* Deployment sector selector */}
             <div className="mb-5 border-t border-stone-800/70 pt-4">
               <SectionLabel>Deployment Sector</SectionLabel>
-              <div className="grid grid-cols-3 gap-1.5 mt-2">
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 mt-2">
                 {MAP_ORDER.map((id) => {
                   const m = MAP_SPECS[id];
                   const selected = settings.mapId === id;
@@ -397,10 +404,10 @@ export function Menus({
                       type="button"
                       data-map-id={id}
                       onClick={() => onUpdateSettings({ mapId: id })}
-                      className={`group text-left px-2 py-2 border transition-all cursor-pointer ${
+                      className={`group text-left px-2.5 py-2.5 rounded-md border transition-all duration-200 cursor-pointer ${
                         selected
-                          ? 'bg-[#1a2230] border-amber-500 text-stone-100 shadow-[0_0_14px_rgba(245,158,11,0.12)]'
-                          : 'bg-[#11161f] border-stone-800 text-stone-400 hover:border-stone-600 hover:text-stone-200'
+                          ? 'bg-gradient-to-b from-[#1e2839] to-[#161d2b] border-amber-500/80 text-stone-100 shadow-[0_0_18px_rgba(245,158,11,0.15)]'
+                          : 'bg-[#11161f]/70 border-stone-800/80 text-stone-400 hover:border-stone-600 hover:text-stone-200 hover:bg-[#151b26]'
                       }`}
                     >
                       <div
@@ -449,10 +456,10 @@ export function Menus({
                       data-level={lv}
                       onClick={() => onUpdateSettings({ level: lv })}
                       title={`${cfg.label} — LV ${lv}`}
-                      className={`py-1.5 border text-[10px] font-bold tracking-wider cursor-pointer transition-colors ${
+                      className={`py-2 rounded-md border text-[10px] font-bold tracking-wider cursor-pointer transition-all duration-150 ${
                         selected
-                          ? 'bg-amber-500 text-stone-950 border-amber-500'
-                          : 'bg-[#11161f] border-stone-800 text-stone-400 hover:border-stone-600 hover:text-stone-200'
+                          ? 'bg-gradient-to-b from-amber-400 to-amber-600 text-stone-950 border-amber-400 shadow-[0_0_14px_rgba(245,158,11,0.35)]'
+                          : 'bg-[#11161f]/70 border-stone-800/80 text-stone-400 hover:border-stone-600 hover:text-stone-200'
                       }`}
                     >
                       <span className={selected ? '' : tierColor}>{lv}</span>
@@ -471,15 +478,15 @@ export function Menus({
             {/* Operation mode: Solo / Multiplayer lobby */}
             <div className="mb-5 border-t border-stone-800/70 pt-4">
               <SectionLabel>Operation Mode</SectionLabel>
-              <div className="flex border border-stone-800 mt-2">
+              <div className="flex rounded-md border border-stone-800/80 bg-[#0d1117]/80 p-0.5 mt-2">
                 <button
                   type="button"
                   data-mode="solo"
                   onClick={() => onUpdateSettings({ mode: 'solo' })}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-[10.5px] tracking-[0.18em] uppercase cursor-pointer transition-colors ${
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-[10.5px] font-semibold tracking-[0.18em] uppercase rounded cursor-pointer transition-all duration-200 ${
                     !inMultiplayer
-                      ? 'bg-amber-500 text-stone-950 font-bold'
-                      : 'bg-[#11161f] text-stone-400 hover:text-stone-200'
+                      ? 'bg-gradient-to-b from-amber-400 to-amber-600 text-stone-950 shadow-[0_0_14px_rgba(245,158,11,0.3)]'
+                      : 'text-stone-400 hover:text-stone-200 hover:bg-white/5'
                   }`}
                 >
                   <User className="w-3 h-3" /> Solo
@@ -488,10 +495,10 @@ export function Menus({
                   type="button"
                   data-mode="multi"
                   onClick={() => onUpdateSettings({ mode: 'multi' })}
-                  className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 text-[10.5px] tracking-[0.18em] uppercase cursor-pointer transition-colors ${
+                  className={`flex-1 flex items-center justify-center gap-1.5 py-2 text-[10.5px] font-semibold tracking-[0.18em] uppercase rounded cursor-pointer transition-all duration-200 ${
                     inMultiplayer
-                      ? 'bg-amber-500 text-stone-950 font-bold'
-                      : 'bg-[#11161f] text-stone-400 hover:text-stone-200'
+                      ? 'bg-gradient-to-b from-amber-400 to-amber-600 text-stone-950 shadow-[0_0_14px_rgba(245,158,11,0.3)]'
+                      : 'text-stone-400 hover:text-stone-200 hover:bg-white/5'
                   }`}
                 >
                   <Users className="w-3 h-3" /> Multiplayer
@@ -510,7 +517,7 @@ export function Menus({
             <div className="mb-5 border-t border-stone-800/70 pt-4">
               <div className="flex items-center justify-between gap-2">
                 <SectionLabel>Arsenal Finish</SectionLabel>
-                <div className="flex flex-wrap justify-end border border-stone-800 max-w-[300px]">
+                <div className="flex flex-wrap justify-end rounded-md border border-stone-800/80 bg-[#0d1117]/80 p-0.5 max-w-[300px]">
                   {PREVIEW_WEAPONS.map((w) => {
                     const active = previewWeapon === w.id;
                     return (
@@ -519,10 +526,10 @@ export function Menus({
                         type="button"
                         data-preview-weapon={w.id}
                         onClick={() => onSelectPreviewWeapon(w.id)}
-                        className={`px-1.5 py-0.5 text-[9.5px] tracking-wider uppercase cursor-pointer transition-colors ${
+                        className={`px-2 py-1 rounded text-[9.5px] font-semibold tracking-wider uppercase cursor-pointer transition-all duration-150 ${
                           active
-                            ? 'bg-amber-500 text-stone-950 font-bold'
-                            : 'bg-[#11161f] text-stone-400 hover:text-stone-200'
+                            ? 'bg-gradient-to-b from-amber-400 to-amber-600 text-stone-950 shadow-[0_0_10px_rgba(245,158,11,0.3)]'
+                            : 'text-stone-400 hover:text-stone-200 hover:bg-white/5'
                         }`}
                       >
                         {w.label}
@@ -541,13 +548,13 @@ export function Menus({
                       type="button"
                       data-skin-id={id}
                       onClick={() => onUpdateSettings({ weaponSkin: id })}
-                      className={`flex items-center gap-2 px-2.5 py-1.5 border text-left transition-colors cursor-pointer ${
+                      className={`flex items-center gap-2.5 px-3 py-2 rounded-md border text-left transition-all duration-150 cursor-pointer ${
                         selected
-                          ? 'bg-[#1a2230] border-amber-500 text-stone-100'
-                          : 'bg-[#11161f] border-stone-800 text-stone-400 hover:border-stone-600 hover:text-stone-200'
+                          ? 'bg-gradient-to-b from-[#1e2839] to-[#161d2b] border-amber-500/80 text-stone-100 shadow-[0_0_14px_rgba(245,158,11,0.12)]'
+                          : 'bg-[#11161f]/70 border-stone-800/80 text-stone-400 hover:border-stone-600 hover:text-stone-200 hover:bg-[#151b26]'
                       }`}
                     >
-                      <span className="flex w-4 h-4 shrink-0 border border-stone-600 overflow-hidden">
+                      <span className="flex w-5 h-5 shrink-0 rounded border border-stone-600/80 overflow-hidden">
                         <span className="w-1/2 h-full" style={{ backgroundColor: s.swatchPrimary }} />
                         <span className="w-1/2 h-full" style={{ backgroundColor: s.swatchAccent }} />
                       </span>
@@ -604,9 +611,9 @@ export function Menus({
               type="button"
               data-start="true"
               onClick={inMultiplayer ? onMpDeploy : onDeploy}
-              className="group relative w-full py-3.5 px-6 bg-amber-500 hover:bg-amber-400 active:bg-amber-600 text-stone-950 font-bold tracking-[0.26em] uppercase text-sm transition-all cursor-pointer overflow-hidden"
+              className="group relative w-full py-4 px-6 rounded-md bg-gradient-to-b from-amber-400 to-amber-600 hover:from-amber-300 hover:to-amber-500 active:from-amber-600 active:to-amber-700 text-stone-950 font-black tracking-[0.28em] uppercase text-sm transition-all duration-200 cursor-pointer overflow-hidden shadow-[0_8px_30px_rgba(245,158,11,0.3)] hover:shadow-[0_8px_40px_rgba(245,158,11,0.45)]"
             >
-              <span className="absolute inset-y-0 left-0 w-0 bg-stone-950/15 transition-all duration-300 group-hover:w-full" />
+              <span className="absolute inset-y-0 left-0 w-0 bg-white/25 transition-all duration-300 group-hover:w-full" />
               <span className="relative flex items-center justify-center gap-2.5">
                 <Play className="w-4 h-4 fill-current" />
                 {inMultiplayer ? (hud.multiplayer.isHost ? 'SYNC DEPLOY' : 'DEPLOY') : 'DEPLOY'}
@@ -641,16 +648,16 @@ export function Menus({
                 <span className="text-[11px] uppercase tracking-[0.18em] text-stone-200">
                   Shadow Quality
                 </span>
-                <div className="flex border border-stone-700">
+                <div className="flex rounded-md border border-stone-800/80 bg-[#0d1117]/80 p-0.5">
                   {(['high', 'medium'] as GraphicsQuality[]).map((q) => (
                     <button
                       key={q}
                       type="button"
                       onClick={() => onUpdateSettings({ quality: q })}
-                      className={`px-3 py-1 text-[11px] uppercase tracking-wider cursor-pointer transition-colors ${
+                      className={`px-3.5 py-1.5 text-[11px] font-semibold uppercase tracking-wider rounded cursor-pointer transition-all duration-150 ${
                         settings.quality === q
-                          ? 'bg-amber-500 text-stone-950 font-bold'
-                          : 'bg-[#141923] text-stone-300 hover:text-stone-100'
+                          ? 'bg-gradient-to-b from-amber-400 to-amber-600 text-stone-950 shadow-[0_0_10px_rgba(245,158,11,0.3)]'
+                          : 'text-stone-400 hover:text-stone-200 hover:bg-white/5'
                       }`}
                     >
                       {q}
@@ -664,10 +671,10 @@ export function Menus({
                 <button
                   type="button"
                   onClick={() => onUpdateSettings({ muted: !settings.muted })}
-                  className={`px-3 py-1 text-[11px] uppercase tracking-wider border cursor-pointer transition-colors ${
+                  className={`px-3.5 py-1.5 text-[11px] font-semibold uppercase tracking-wider rounded-md border cursor-pointer transition-all duration-150 ${
                     settings.muted
-                      ? 'border-red-900/70 bg-red-950/40 text-red-300 hover:bg-red-950/60'
-                      : 'border-stone-700 bg-[#141923] hover:bg-[#1c2331] text-stone-200'
+                      ? 'border-red-900/60 bg-red-950/40 text-red-300 hover:bg-red-950/60'
+                      : 'border-stone-700/70 bg-[#141923] hover:bg-[#1c2331] text-stone-200'
                   }`}
                 >
                   {settings.muted ? 'Muted' : 'Active'}
@@ -675,9 +682,10 @@ export function Menus({
               </div>
             </div>
           </div>
+          </div>
 
           {/* Grouped control reference */}
-          <div className="flex flex-wrap gap-x-6 gap-y-1.5 text-[10px] tracking-[0.14em] text-stone-400 uppercase pointer-events-none tac-fade-up" style={{ animationDelay: '0.15s' }}>
+          <div className="mt-4 shrink-0 flex flex-wrap justify-center gap-x-4 sm:gap-x-6 gap-y-1.5 rounded-md border border-stone-800/60 bg-[#0b0f16]/70 backdrop-blur-sm px-3 sm:px-5 py-2.5 text-[9px] sm:text-[10px] tracking-[0.14em] text-stone-400 uppercase pointer-events-none tac-fade-up" style={{ animationDelay: '0.15s' }}>
             <span><b className="text-stone-200">Move</b> WASD · Shift Sprint · C Slide</span>
             <span><b className="text-stone-200">Combat</b> LMB Fire · RMB ADS · R Reload</span>
             <span><b className="text-stone-200">Ordnance</b> V Knife · G Frag</span>
@@ -695,11 +703,11 @@ export function Menus({
     const atMax = hud.levelInfo.level >= MAX_LEVEL;
     return (
       <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-4 font-mono text-stone-100">
-        <div className="w-full max-w-md bg-[#10141c] border-t-4 border-emerald-500 p-7 shadow-2xl tac-fade-up">
+        <div className="w-full max-w-md rounded-lg bg-[#10141c]/95 backdrop-blur-md border border-emerald-900/50 border-t-4 border-t-emerald-500 p-5 sm:p-7 shadow-2xl tac-fade-up">
           <div className="text-xs tracking-[0.28em] text-emerald-400 uppercase mb-1">
             All Waves Cleared
           </div>
-          <h2 className="text-3xl font-bold tracking-[0.16em] uppercase text-stone-100 mb-2">
+          <h2 className="text-2xl sm:text-3xl font-bold tracking-[0.16em] uppercase text-stone-100 mb-2">
             Sector Secure
           </h2>
           <p className="text-[11px] tracking-[0.14em] uppercase text-stone-400 mb-6">
@@ -740,8 +748,8 @@ export function Menus({
   if (hud.phase === 'paused') {
     return (
       <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/60 p-4 font-mono text-stone-100">
-        <div className="w-full max-w-sm bg-[#10141c] border-t-2 border-amber-500 p-7 shadow-2xl">
-          <h2 className="text-2xl font-bold tracking-[0.2em] uppercase text-stone-100 mb-5">
+        <div className="w-full max-w-sm rounded-lg bg-[#10141c]/95 backdrop-blur-md border border-amber-900/40 border-t-2 border-t-amber-500 p-5 sm:p-7 shadow-2xl">
+          <h2 className="text-xl sm:text-2xl font-bold tracking-[0.2em] uppercase text-stone-100 mb-5">
             Tactical Pause
           </h2>
 
@@ -820,16 +828,16 @@ export function Menus({
     const accuracy = calculateAccuracyPercent(hud.stats.shotsFired, hud.stats.shotsHit);
     return (
       <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/70 p-4 font-mono text-stone-100">
-        <div className="w-full max-w-md bg-[#10141c] border-t-4 border-red-500 p-7 shadow-2xl">
+        <div className="w-full max-w-md rounded-lg bg-[#10141c]/95 backdrop-blur-md border border-red-900/50 border-t-4 border-t-red-500 p-5 sm:p-7 shadow-2xl">
           <div className="text-xs tracking-[0.28em] text-red-400 uppercase mb-1">
             Operator Down
           </div>
-          <h2 className="text-3xl font-bold tracking-[0.16em] uppercase text-stone-100 mb-6">
+          <h2 className="text-2xl sm:text-3xl font-bold tracking-[0.16em] uppercase text-stone-100 mb-6">
             Mission Failed
           </h2>
 
           <div className="grid grid-cols-2 gap-3 mb-7">
-            <div className="bg-[#161c28] border border-stone-800 p-3.5">
+            <div className="rounded-md bg-[#161c28]/80 border border-stone-800/80 p-3.5">
               <div className="text-[10px] tracking-[0.2em] text-stone-400 uppercase">
                 Waves Survived
               </div>
@@ -837,7 +845,7 @@ export function Menus({
                 {hud.stats.wave}
               </div>
             </div>
-            <div className="bg-[#161c28] border border-stone-800 p-3.5">
+            <div className="rounded-md bg-[#161c28]/80 border border-stone-800/80 p-3.5">
               <div className="text-[10px] tracking-[0.2em] text-stone-400 uppercase">
                 Total Kills
               </div>
@@ -845,7 +853,7 @@ export function Menus({
                 {hud.stats.kills}
               </div>
             </div>
-            <div className="bg-[#161c28] border border-stone-800 p-3.5">
+            <div className="rounded-md bg-[#161c28]/80 border border-stone-800/80 p-3.5">
               <div className="text-[10px] tracking-[0.2em] text-stone-400 uppercase">
                 Accuracy
               </div>
@@ -853,7 +861,7 @@ export function Menus({
                 {accuracy}%
               </div>
             </div>
-            <div className="bg-[#161c28] border border-stone-800 p-3.5">
+            <div className="rounded-md bg-[#161c28]/80 border border-stone-800/80 p-3.5">
               <div className="text-[10px] tracking-[0.2em] text-stone-400 uppercase">
                 Headshots
               </div>

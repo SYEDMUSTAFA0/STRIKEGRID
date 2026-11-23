@@ -47,6 +47,15 @@ export interface PresenceInvite {
   mode?: MatchModeId;
 }
 
+/** A lobby-wide chat line visible to every online player. */
+export interface LobbyChatMessage {
+  id: string;
+  fromId: string;
+  fromName: string;
+  text: string;
+  ts: number;
+}
+
 export interface PresenceBackend {
   readonly kind: 'supabase' | 'firebase' | 'offline';
   start(profile: PlayerProfile): void;
@@ -62,12 +71,24 @@ export interface PresenceBackend {
    * matchmaking directory and their cloud status reads `inactive`.
    */
   setManualStatus(active: boolean): void;
+  // ---- Lobby chat (optional; adapters without support simply omit these) ----
+  sendChat?(text: string): void;
+  onChat?(cb: (msg: LobbyChatMessage) => void): () => void;
+  // ---- Voice-chat signaling relay (SDP/ICE payloads between peers) ----
+  sendSignal?(toId: string, payload: unknown): void;
+  onSignal?(cb: (fromId: string, payload: unknown) => void): () => void;
+  /** Hint that voice chat is active so adapters can poll signaling faster. */
+  setVoiceActive?(active: boolean): void;
   dispose(): void;
 }
 
 const PRESENCE_TABLE = 'strikegrid_players';
 const INVITE_TABLE = 'strikegrid_invites';
+const CHAT_TABLE = 'strikegrid_chat';
+const SIGNAL_TABLE = 'strikegrid_signal';
 const POLL_MS = 4000;
+const CHAT_POLL_MS = 2500;
+const VOICE_POLL_MS = 1000;
 const STALE_MS = 15000;
 
 function nowIso(): string {
@@ -139,6 +160,12 @@ class SupabasePresence implements PresenceBackend {
   private manualActive = true;
   private readonly playerListeners = new Set<(p: OnlinePlayer[]) => void>();
   private readonly inviteListeners = new Set<(i: PresenceInvite) => void>();
+  private readonly chatListeners = new Set<(m: LobbyChatMessage) => void>();
+  private readonly signalListeners = new Set<(fromId: string, payload: unknown) => void>();
+  private readonly seenChatIds = new Set<number>();
+  private chatTimer: number | null = null;
+  private voiceTimer: number | null = null;
+  private voiceActive = false;
   private readonly onPageHide = () => this.markInactiveForUnload();
 
   constructor() {
@@ -157,6 +184,8 @@ class SupabasePresence implements PresenceBackend {
       void this.pushSelf();
       void this.poll();
     }, POLL_MS);
+    this.chatTimer = window.setInterval(() => void this.pollChat(), CHAT_POLL_MS);
+    void this.pollChat();
   }
 
   private headers(json = true): Record<string, string> {
@@ -336,6 +365,139 @@ class SupabasePresence implements PresenceBackend {
     }).catch(() => {});
   }
 
+  // ---- Lobby chat ----
+
+  sendChat(text: string): void {
+    const me = this.profile;
+    const body = text.trim().slice(0, 280);
+    if (!me || !body) return;
+    void fetch(`${this.cfg.url}/rest/v1/${CHAT_TABLE}`, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({
+        from_id: me.id,
+        from_callsign: me.callsign,
+        text: body,
+        created_at: nowIso(),
+      }),
+    }).catch(() => {});
+  }
+
+  private async pollChat(): Promise<void> {
+    if (this.disposed || !this.profile) return;
+    try {
+      const res = await fetch(
+        `${this.cfg.url}/rest/v1/${CHAT_TABLE}?select=id,from_id,from_callsign,text,created_at&order=created_at.desc&limit=50`,
+        { headers: this.headers(false) },
+      );
+      if (!res.ok) return;
+      const rows = (await res.json()) as Array<{
+        id: number;
+        from_id?: string;
+        from_callsign?: string;
+        text?: string;
+        created_at?: string;
+      }>;
+      const fresh = rows
+        .filter((r) => typeof r.id === 'number' && !this.seenChatIds.has(r.id))
+        .sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
+      for (const r of fresh) {
+        this.seenChatIds.add(r.id);
+        if (this.seenChatIds.size > 400) {
+          this.seenChatIds.delete(this.seenChatIds.values().next().value as number);
+        }
+        if (r.from_id === this.profile.id || !r.text) continue;
+        for (const cb of this.chatListeners) {
+          cb({
+            id: String(r.id),
+            fromId: r.from_id || 'unknown',
+            fromName: r.from_callsign || 'OPERATOR',
+            text: r.text,
+            ts: r.created_at ? Date.parse(r.created_at) : Date.now(),
+          });
+        }
+      }
+    } catch {
+      // chat table may not exist yet — ignore
+    }
+  }
+
+  onChat(cb: (msg: LobbyChatMessage) => void): () => void {
+    this.chatListeners.add(cb);
+    return () => this.chatListeners.delete(cb);
+  }
+
+  // ---- Voice signaling relay ----
+
+  sendSignal(toId: string, payload: unknown): void {
+    const me = this.profile;
+    if (!me || !toId) return;
+    void fetch(`${this.cfg.url}/rest/v1/${SIGNAL_TABLE}`, {
+      method: 'POST',
+      headers: this.headers(),
+      body: JSON.stringify({
+        from_id: me.id,
+        to_id: toId,
+        data: payload,
+        created_at: nowIso(),
+      }),
+    }).catch(() => {});
+  }
+
+  private startVoicePoll(): void {
+    if (this.voiceTimer !== null) return;
+    this.voiceTimer = window.setInterval(() => void this.pollSignals(), VOICE_POLL_MS);
+    void this.pollSignals();
+  }
+
+  private stopVoicePoll(): void {
+    if (this.voiceTimer !== null) window.clearInterval(this.voiceTimer);
+    this.voiceTimer = null;
+  }
+
+  setVoiceActive(active: boolean): void {
+    if (this.voiceActive === active) return;
+    this.voiceActive = active;
+    if (active) this.startVoicePoll();
+    else this.stopVoicePoll();
+  }
+
+  private async pollSignals(): Promise<void> {
+    const me = this.profile;
+    if (this.disposed || !me) return;
+    try {
+      const res = await fetch(
+        `${this.cfg.url}/rest/v1/${SIGNAL_TABLE}?select=id,from_id,to_id,data,created_at&to_id=eq.${encodeURIComponent(me.id)}&order=created_at.asc&limit=50`,
+        { headers: this.headers(false) },
+      );
+      if (!res.ok) return;
+      const rows = (await res.json()) as Array<{
+        id: number;
+        from_id?: string;
+        data?: unknown;
+      }>;
+      const ids: number[] = [];
+      for (const r of rows) {
+        if (typeof r.id === 'number') ids.push(r.id);
+        if (!r.from_id || r.from_id === me.id || r.data == null) continue;
+        for (const cb of this.signalListeners) cb(r.from_id, r.data);
+      }
+      if (ids.length > 0) {
+        void fetch(
+          `${this.cfg.url}/rest/v1/${SIGNAL_TABLE}?id=in.(${ids.join(',')})`,
+          { method: 'DELETE', headers: this.headers(false) },
+        ).catch(() => {});
+      }
+    } catch {
+      // signal table may not exist yet — ignore
+    }
+  }
+
+  onSignal(cb: (fromId: string, payload: unknown) => void): () => void {
+    this.signalListeners.add(cb);
+    return () => this.signalListeners.delete(cb);
+  }
+
   private list(): OnlinePlayer[] {
     return [...this.players.values()].sort((a, b) => Number(b.isSelf) - Number(a.isSelf) || a.callsign.localeCompare(b.callsign));
   }
@@ -349,9 +511,14 @@ class SupabasePresence implements PresenceBackend {
     this.disposed = true;
     window.removeEventListener('pagehide', this.onPageHide);
     if (this.timer !== null) window.clearInterval(this.timer);
+    if (this.chatTimer !== null) window.clearInterval(this.chatTimer);
+    this.stopVoicePoll();
     this.timer = null;
+    this.chatTimer = null;
     this.playerListeners.clear();
     this.inviteListeners.clear();
+    this.chatListeners.clear();
+    this.signalListeners.clear();
     // Best-effort presence cleanup (rules may reject unauthenticated deletes).
     if (this.profile) {
       void fetch(`${this.cfg.url}/rest/v1/${PRESENCE_TABLE}?id=eq.${encodeURIComponent(this.profile.id)}`, {
@@ -377,6 +544,12 @@ class FirebasePresence implements PresenceBackend {
   private manualActive = true;
   private readonly playerListeners = new Set<(p: OnlinePlayer[]) => void>();
   private readonly inviteListeners = new Set<(i: PresenceInvite) => void>();
+  private readonly chatListeners = new Set<(m: LobbyChatMessage) => void>();
+  private readonly signalListeners = new Set<(fromId: string, payload: unknown) => void>();
+  private readonly seenChatIds = new Set<string>();
+  private chatTimer: number | null = null;
+  private voiceTimer: number | null = null;
+  private voiceActive = false;
   private readonly onPageHide = () => this.markInactiveForUnload();
 
   constructor() {
@@ -387,6 +560,14 @@ class FirebasePresence implements PresenceBackend {
 
   private get base(): string | null {
     return this.cfg.databaseURL ? `${this.cfg.databaseURL}/strikegrid/presence` : null;
+  }
+
+  private get chatNode(): string | null {
+    return this.cfg.databaseURL ? `${this.cfg.databaseURL}/strikegrid/chat` : null;
+  }
+
+  private get voiceNode(): string | null {
+    return this.cfg.databaseURL ? `${this.cfg.databaseURL}/strikegrid/voice` : null;
   }
 
   private authQuery(): string {
@@ -403,6 +584,8 @@ class FirebasePresence implements PresenceBackend {
       void this.pushSelf();
       void this.poll();
     }, POLL_MS);
+    this.chatTimer = window.setInterval(() => void this.pollChat(), CHAT_POLL_MS);
+    void this.pollChat();
   }
 
   private async pushSelf(): Promise<void> {
@@ -556,6 +739,142 @@ class FirebasePresence implements PresenceBackend {
     }).catch(() => {});
   }
 
+  // ---- Lobby chat ----
+
+  sendChat(text: string): void {
+    const me = this.profile;
+    const body = text.trim().slice(0, 280);
+    const node = this.chatNode;
+    if (!me || !node || !body) return;
+    void fetch(`${node}.json${this.authQuery()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fromId: me.id,
+        fromCallsign: me.callsign,
+        text: body,
+        ts: Date.now(),
+      }),
+    }).catch(() => {});
+  }
+
+  private async pollChat(): Promise<void> {
+    const node = this.chatNode;
+    const me = this.profile;
+    if (this.disposed || !node || !me) return;
+    try {
+      const res = await fetch(`${node}.json${this.authQuery()}`);
+      if (!res.ok) return;
+      const data = (await res.json()) as Record<
+        string,
+        { fromId?: string; fromCallsign?: string; text?: string; ts?: number }
+      > | null;
+      if (!data || typeof data !== 'object') return;
+      const entries = Object.entries(data)
+        .filter(([key, m]) => m && !this.seenChatIds.has(key))
+        .sort((a, b) => (a[1].ts ?? 0) - (b[1].ts ?? 0));
+      // Opportunistic trim: keep the node bounded for REST polling.
+      const keys = Object.keys(data);
+      if (keys.length > 150) {
+        const sorted = entries.length ? entries : Object.entries(data).sort((a, b) => (a[1].ts ?? 0) - (b[1].ts ?? 0));
+        const stale = sorted.slice(0, Math.max(0, keys.length - 100));
+        for (const [key] of stale) {
+          void fetch(`${node}/${encodeURIComponent(key)}.json${this.authQuery()}`, {
+            method: 'DELETE',
+          }).catch(() => {});
+        }
+      }
+      for (const [key, m] of entries) {
+        this.seenChatIds.add(key);
+        if (this.seenChatIds.size > 400) {
+          this.seenChatIds.delete(this.seenChatIds.values().next().value as string);
+        }
+        if (m.fromId === me.id || !m.text) continue;
+        for (const cb of this.chatListeners) {
+          cb({
+            id: key,
+            fromId: m.fromId || 'unknown',
+            fromName: m.fromCallsign || 'OPERATOR',
+            text: m.text,
+            ts: m.ts ?? Date.now(),
+          });
+        }
+      }
+    } catch {
+      // chat node may not exist yet — ignore
+    }
+  }
+
+  onChat(cb: (msg: LobbyChatMessage) => void): () => void {
+    this.chatListeners.add(cb);
+    return () => this.chatListeners.delete(cb);
+  }
+
+  // ---- Voice signaling relay ----
+
+  sendSignal(toId: string, payload: unknown): void {
+    const me = this.profile;
+    const node = this.voiceNode;
+    if (!me || !node || !toId) return;
+    void fetch(`${node}.json${this.authQuery()}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: me.id,
+        to: toId,
+        data: payload,
+        ts: Date.now(),
+      }),
+    }).catch(() => {});
+  }
+
+  private startVoicePoll(): void {
+    if (this.voiceTimer !== null) return;
+    this.voiceTimer = window.setInterval(() => void this.pollSignals(), VOICE_POLL_MS);
+    void this.pollSignals();
+  }
+
+  private stopVoicePoll(): void {
+    if (this.voiceTimer !== null) window.clearInterval(this.voiceTimer);
+    this.voiceTimer = null;
+  }
+
+  setVoiceActive(active: boolean): void {
+    if (this.voiceActive === active) return;
+    this.voiceActive = active;
+    if (active) this.startVoicePoll();
+    else this.stopVoicePoll();
+  }
+
+  private async pollSignals(): Promise<void> {
+    const node = this.voiceNode;
+    const me = this.profile;
+    if (this.disposed || !node || !me) return;
+    try {
+      const res = await fetch(`${node}.json${this.authQuery()}`);
+      if (!res.ok) return;
+      const data = (await res.json()) as Record<
+        string,
+        { from?: string; to?: string; data?: unknown }
+      > | null;
+      if (!data || typeof data !== 'object') return;
+      for (const [key, m] of Object.entries(data)) {
+        if (m?.to !== me.id || !m.from || m.from === me.id || m.data == null) continue;
+        for (const cb of this.signalListeners) cb(m.from, m.data);
+        void fetch(`${node}/${encodeURIComponent(key)}.json${this.authQuery()}`, {
+          method: 'DELETE',
+        }).catch(() => {});
+      }
+    } catch {
+      // voice node may not exist yet — ignore
+    }
+  }
+
+  onSignal(cb: (fromId: string, payload: unknown) => void): () => void {
+    this.signalListeners.add(cb);
+    return () => this.signalListeners.delete(cb);
+  }
+
   private list(): OnlinePlayer[] {
     return [...this.players.values()].sort((a, b) => Number(b.isSelf) - Number(a.isSelf) || a.callsign.localeCompare(b.callsign));
   }
@@ -569,9 +888,14 @@ class FirebasePresence implements PresenceBackend {
     this.disposed = true;
     window.removeEventListener('pagehide', this.onPageHide);
     if (this.timer !== null) window.clearInterval(this.timer);
+    if (this.chatTimer !== null) window.clearInterval(this.chatTimer);
+    this.stopVoicePoll();
     this.timer = null;
+    this.chatTimer = null;
     this.playerListeners.clear();
     this.inviteListeners.clear();
+    this.chatListeners.clear();
+    this.signalListeners.clear();
     const base = this.base;
     if (base && this.profile) {
       void fetch(`${base}/${encodeURIComponent(this.profile.id)}.json${this.authQuery()}`, {
@@ -586,7 +910,7 @@ class FirebasePresence implements PresenceBackend {
 // ---------------------------------------------------------------------------
 
 interface OfflineWire {
-  t: 'presence' | 'invite';
+  t: 'presence' | 'invite' | 'chat' | 'sig';
   id: string;
   callsign: string;
   friendCode?: string;
@@ -594,11 +918,21 @@ interface OfflineWire {
   mode?: MatchModeId;
   roomCode?: string;
   ping?: number;
+  avatarPreset?: string;
+  country?: string;
+  level?: number;
+  favoriteWeapon?: string;
+  fullName?: string;
+  playstyle?: string;
   ts: number;
   // invite fields
   to?: string;
   fromId?: string;
   fromCallsign?: string;
+  // chat / voice-signal fields
+  text?: string;
+  fromName?: string;
+  data?: unknown;
 }
 
 const OFFLINE_CHANNEL = 'strikegrid-presence-v1';
@@ -615,6 +949,8 @@ class OfflinePresence implements PresenceBackend {
   private manualActive = true;
   private readonly playerListeners = new Set<(p: OnlinePlayer[]) => void>();
   private readonly inviteListeners = new Set<(i: PresenceInvite) => void>();
+  private readonly chatListeners = new Set<(m: LobbyChatMessage) => void>();
+  private readonly signalListeners = new Set<(fromId: string, payload: unknown) => void>();
 
   start(profile: PlayerProfile): void {
     this.profile = profile;
@@ -648,6 +984,12 @@ class OfflinePresence implements PresenceBackend {
       mode: active ? this.activity.mode : undefined,
       roomCode: active ? this.activity.roomCode : undefined,
       ping: 2 + Math.floor(Math.random() * 14),
+      avatarPreset: this.profile.avatarPreset,
+      country: this.profile.country,
+      level: this.profile.level,
+      favoriteWeapon: this.profile.favoriteWeapon,
+      fullName: this.profile.fullName,
+      playstyle: this.profile.playstyle,
       ts: Date.now(),
     };
     try {
@@ -658,7 +1000,29 @@ class OfflinePresence implements PresenceBackend {
   }
 
   private handle(msg: OfflineWire): void {
-    if (!msg || msg.t === 'presence') {
+    if (!msg) return;
+    if (msg.t === 'chat') {
+      if (msg.id && msg.id !== this.profile?.id && msg.text) {
+        for (const cb of this.chatListeners) {
+          cb({
+            id: `${msg.id}-${msg.ts ?? Date.now()}`,
+            fromId: msg.id,
+            fromName: msg.fromName || msg.callsign || 'OPERATOR',
+            text: msg.text,
+            ts: msg.ts ?? Date.now(),
+          });
+        }
+      }
+      return;
+    }
+    if (msg.t === 'sig') {
+      const me = this.profile;
+      if (me && msg.to === me.id && msg.fromId && msg.data != null) {
+        for (const cb of this.signalListeners) cb(msg.fromId, msg.data);
+      }
+      return;
+    }
+    if (msg.t === 'presence') {
       if (!msg?.id || msg.id === this.profile?.id) return;
       const status: PresenceStatus =
         msg.status === 'match' || msg.status === 'lobby' || msg.status === 'inactive'
@@ -673,6 +1037,12 @@ class OfflinePresence implements PresenceBackend {
         roomCode: msg.roomCode,
         ping: msg.ping ?? 8,
         isSelf: false,
+        avatarPreset: msg.avatarPreset,
+        country: msg.country,
+        level: msg.level,
+        favoriteWeapon: msg.favoriteWeapon,
+        fullName: msg.fullName,
+        playstyle: msg.playstyle,
         ts: msg.ts || Date.now(),
       });
       this.emit();
@@ -759,6 +1129,58 @@ class OfflinePresence implements PresenceBackend {
     }
   }
 
+  // ---- Lobby chat / voice signaling (same-browser BroadcastChannel) ----
+
+  sendChat(text: string): void {
+    const me = this.profile;
+    const body = text.trim().slice(0, 280);
+    if (!me || this.disposed || !body) return;
+    try {
+      this.bc?.postMessage({
+        t: 'chat',
+        id: me.id,
+        callsign: me.callsign,
+        fromName: me.callsign,
+        text: body,
+        ts: Date.now(),
+      } satisfies OfflineWire);
+    } catch {
+      // ignore
+    }
+  }
+
+  onChat(cb: (msg: LobbyChatMessage) => void): () => void {
+    this.chatListeners.add(cb);
+    return () => this.chatListeners.delete(cb);
+  }
+
+  sendSignal(toId: string, payload: unknown): void {
+    const me = this.profile;
+    if (!me || this.disposed || !toId) return;
+    try {
+      this.bc?.postMessage({
+        t: 'sig',
+        id: me.id,
+        callsign: me.callsign,
+        fromId: me.id,
+        to: toId,
+        data: payload,
+        ts: Date.now(),
+      } satisfies OfflineWire);
+    } catch {
+      // ignore
+    }
+  }
+
+  onSignal(cb: (fromId: string, payload: unknown) => void): () => void {
+    this.signalListeners.add(cb);
+    return () => this.signalListeners.delete(cb);
+  }
+
+  setVoiceActive(_active: boolean): void {
+    // BroadcastChannel push needs no extra polling.
+  }
+
   private list(): OnlinePlayer[] {
     const self: OnlinePlayer | null = this.profile
       ? {
@@ -800,6 +1222,8 @@ class OfflinePresence implements PresenceBackend {
     this.players.clear();
     this.playerListeners.clear();
     this.inviteListeners.clear();
+    this.chatListeners.clear();
+    this.signalListeners.clear();
   }
 }
 

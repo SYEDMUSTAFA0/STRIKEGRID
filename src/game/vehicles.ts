@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { ProceduralTextureLibrary } from './textures';
-import { loadOptionalModel, normalizeVehicleModel } from './modelAssets';
+import { loadOptionalModel, modelPaths, normalizeVehicleModel } from './modelAssets';
 import type { AABB2D, RampCollider } from './types';
 
 export interface WorldBuildContext {
@@ -447,7 +447,7 @@ export function addTacticalMotorcycle(
     ctx,
     group,
     new Set([wheelRoot, shadow]),
-    ['/models/bike.glb', '/models/motorcycle.glb', '/models/bike.gltf'],
+    modelPaths('bike.glb', 'motorcycle.glb', 'bike.gltf'),
     2.35,
   );
 
@@ -777,8 +777,8 @@ export function addTacticalVehicle(
     group,
     new Set([wheelRoot, shadow]),
     variant === 'suv'
-      ? ['/models/suv.glb', '/models/car.glb', '/models/vehicle.glb', '/models/suv.gltf']
-      : ['/models/pickup.glb', '/models/truck.glb', '/models/car.glb', '/models/vehicle.glb', '/models/pickup.gltf'],
+      ? modelPaths('suv.glb', 'car.glb', 'vehicle.glb', 'suv.gltf')
+      : modelPaths('pickup.glb', 'truck.glb', 'car.glb', 'vehicle.glb', 'pickup.gltf'),
     4.4,
   );
 

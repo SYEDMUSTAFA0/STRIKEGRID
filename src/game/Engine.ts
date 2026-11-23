@@ -63,7 +63,8 @@ export class Engine {
 
   private readonly sound: SoundEngine;
   private readonly world: World;
-  private readonly player: Player;
+  /** Public so virtual (touch) controls can inject input on mobile devices. */
+  public readonly player: Player;
   private readonly weapons: Weapons;
   private readonly enemies: Enemies;
 
@@ -89,6 +90,7 @@ export class Engine {
   private mpScores = new Map<string, { kills: number; deaths: number }>();
   private mpDeaths = 0;
   private mpDownNotified = new Set<string>();
+  private readonly botPhase = new Map<string, number>();
   private waveClearDelay = 0;
   private waveBannerTimer = 0;
   private waveClearBannerTimer = 0;
@@ -117,6 +119,10 @@ export class Engine {
   private lastTimestamp = 0;
   private elapsed = 0;
   private hudEmitAccum = 0;
+  private basePixelRatio = 1;
+  private dynScale = 1;
+  private perfAccum = 0;
+  private perfFrames = 0;
   private titleTourAngle: number;
   private previewWeapon: WeaponId = 'rifle';
   private resizeObserver: ResizeObserver;
@@ -143,7 +149,8 @@ export class Engine {
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
     this.renderer.toneMappingExposure = MAP_LIGHTING_PROFILES[this.settings.mapId].exposure;
-    this.renderer.setPixelRatio(this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2));
+    this.basePixelRatio = this.isSoftwareGl ? 1 : Math.min(window.devicePixelRatio, 2);
+    this.renderer.setPixelRatio(this.basePixelRatio);
     this.renderer.setSize(width, height);
     this.renderer.shadowMap.enabled = !this.isSoftwareGl;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -168,6 +175,7 @@ export class Engine {
         profile.bloomRadius,
         profile.bloomThreshold,
       );
+      this.bloomPass.enabled = this.settings.quality !== 'medium';
       this.composer.addPass(this.bloomPass);
     }
 
@@ -300,6 +308,9 @@ export class Engine {
     this.sound.setMuted(this.settings.muted);
     if (next.quality) {
       this.world.setShadowQuality(next.quality);
+      // Medium quality also skips the bloom composite pass — the single most
+      // expensive post effect on weaker GPUs.
+      if (this.bloomPass) this.bloomPass.enabled = next.quality !== 'medium';
     }
     let needsRender = false;
     if (this.settings.weaponSkin !== prevSkin) {
@@ -501,7 +512,37 @@ export class Engine {
       this.renderer.render(this.scene, this.camera);
     }
 
+    this.adaptResolution(rawDt);
     this.scheduleNextFrame();
+  }
+
+  /**
+   * Dynamic resolution scaling: samples frame time every ~90 frames and
+   * steps the pixel ratio down when the GPU can't hold ~50fps, stepping back
+   * up when there's headroom. Keeps the game smooth on weaker hardware.
+   */
+  private adaptResolution(rawDt: number): void {
+    this.perfAccum += rawDt;
+    this.perfFrames++;
+    if (this.perfFrames < 90) return;
+    const avg = this.perfAccum / this.perfFrames;
+    this.perfAccum = 0;
+    this.perfFrames = 0;
+    if (avg > 0.02 && this.dynScale > 0.5) {
+      this.dynScale = Math.max(0.5, this.dynScale - 0.15);
+      this.applyDynScale();
+    } else if (avg < 0.0135 && this.dynScale < 1) {
+      this.dynScale = Math.min(1, this.dynScale + 0.1);
+      this.applyDynScale();
+    }
+  }
+
+  private applyDynScale(): void {
+    this.renderer.setPixelRatio(this.basePixelRatio * this.dynScale);
+    const width = this.container.clientWidth || window.innerWidth;
+    const height = this.container.clientHeight || window.innerHeight;
+    this.renderer.setSize(width, height);
+    this.composer?.setSize(width, height);
   }
 
   private updateTitleTour(dt: number): void {
@@ -934,6 +975,29 @@ export class Engine {
         this.mpScoreTimer = 0;
         this.mpChannel.broadcastScore({ kills: this.kills, deaths: this.mpDeaths });
       }
+      // Simulated squad bots: wander near the deployment zone so the roster,
+      // team colors, and scoreboard can be exercised with zero real peers.
+      if (this.remoteOps) {
+        const spawn = MAP_SPECS[this.settings.mapId].playerSpawn;
+        for (const p of this.mpPeers) {
+          if (!p.bot) continue;
+          const phase = (this.botPhase.get(p.id) ?? Math.random() * Math.PI * 2) + rawDt * 0.35;
+          this.botPhase.set(p.id, phase);
+          const radius = 5 + (phase % 3);
+          const bx = spawn.x + Math.cos(phase) * radius;
+          const bz = spawn.z - 6 - Math.sin(phase * 0.7) * radius;
+          this.remoteOps.updatePose(p.id, {
+            x: bx,
+            y: spawn.y,
+            z: bz,
+            yaw: phase + Math.PI / 2,
+            hp: 100,
+            skin: p.skin,
+            moving: true,
+            ads: false,
+          });
+        }
+      }
     }
 
     const alive = this.enemies.getAliveCount();
@@ -1064,6 +1128,7 @@ export class Engine {
       id: p.id,
       nickname: p.nickname,
       skin: p.skin,
+      side: p.side,
     });
     this.mpUnsubs.push(
       channel.onPeers((peers) => {
@@ -1234,6 +1299,8 @@ export class Engine {
       matchMode: this.settings.matchMode,
       tier: this.settings.tier,
       scores: [] as ScoreEntry[],
+      selfSide: null,
+      friendlyFire: this.settings.friendlyFire,
     };
     if (!this.mpChannel) {
       return empty;
@@ -1244,6 +1311,7 @@ export class Engine {
       ready: this.mpChannel.isReady,
       isHost: this.mpChannel.isHost,
       skin: this.settings.weaponSkin,
+      side: this.mpChannel.selfSide,
     };
     const peers: MultiplayerPeer[] = [self, ...this.mpPeers.map((p) => ({
       id: p.id,
@@ -1251,20 +1319,30 @@ export class Engine {
       ready: p.ready,
       isHost: p.isHost,
       skin: p.skin,
+      side: p.side,
+      bot: p.bot,
     }))];
 
-    // Team assignment for team-based modes: alternate alpha/bravo by slot.
-    const teamBased = this.settings.matchMode !== 'survival';
+    // Squad identity comes from lobby picks: alpha/bravo are teams,
+    // 'attack' (or unset) means every operator is a rival (FFA-style).
+    const squadMode = this.settings.matchMode !== 'survival';
+    const sideToTeam = (side?: string): 'alpha' | 'bravo' | null =>
+      !squadMode || side === 'attack' || !side
+        ? null
+        : side === 'alpha' || side === 'bravo'
+          ? side
+          : null;
     const scores: ScoreEntry[] = peers.map((p, idx) => {
       const sc = p.id === this.mpChannel!.selfId
         ? { kills: this.kills, deaths: this.mpDeaths }
         : this.mpScores.get(p.id) ?? { kills: 0, deaths: 0 };
+      const sideTeam = sideToTeam(p.side);
       return {
         id: p.id,
         nickname: p.nickname,
         kills: sc.kills,
         deaths: sc.deaths,
-        team: teamBased ? (idx % 2 === 0 ? 'alpha' : 'bravo') : null,
+        team: sideTeam ?? (squadMode ? (idx % 2 === 0 ? 'alpha' : 'bravo') : null),
         isSelf: p.id === this.mpChannel!.selfId,
       };
     });
@@ -1280,6 +1358,8 @@ export class Engine {
       matchMode: this.settings.matchMode,
       tier: this.settings.tier,
       scores,
+      selfSide: this.mpChannel.selfSide,
+      friendlyFire: this.settings.friendlyFire,
     };
   }
 

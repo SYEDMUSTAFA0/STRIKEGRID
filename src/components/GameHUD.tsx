@@ -1,6 +1,20 @@
 import { useEffect, useRef } from 'react';
 import { MAP_SPECS, MATCH_MODE_SPECS, WEAPON_ORDER, WEAPON_SPECS, ZONE_SPECS } from '../game/rules';
 import type { HudSnapshot, MapId, WeaponId } from '../game/types';
+import { ChatBox } from './ChatBox';
+import type { ChatLine } from './ChatBox';
+import { VoiceControls } from './VoiceControls';
+import type { VoiceStatus } from '../game/voice';
+
+interface VoiceHudProps {
+  enabled: boolean;
+  muted: boolean;
+  status: VoiceStatus;
+  level: number;
+  peerCount: number;
+  onToggleMic: () => void;
+  onToggleMute: () => void;
+}
 
 interface GameHUDProps {
   hud: HudSnapshot;
@@ -9,6 +23,12 @@ interface GameHUDProps {
   onToggleMute: () => void;
   onPause: () => void;
   showScores?: boolean;
+  chatLines?: ChatLine[];
+  chatSelfName?: string;
+  chatOpen?: boolean;
+  onChatOpenChange?: (open: boolean) => void;
+  onSendChat?: (text: string) => void;
+  voice?: VoiceHudProps;
 }
 
 const SLOT_SHORT_NAME: Record<WeaponId, string> = {
@@ -22,7 +42,7 @@ const SLOT_SHORT_NAME: Record<WeaponId, string> = {
   deagle: 'DGL',
 };
 
-export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause, showScores = false }: GameHUDProps) {
+export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause, showScores = false, chatLines, chatSelfName, chatOpen = false, onChatOpenChange, onSendChat, voice }: GameHUDProps) {
   const ghostHealthRef = useRef(hud.health);
 
   useEffect(() => {
@@ -180,23 +200,23 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
       )}
 
       {/* Top-Left: Wave & Hostiles Cluster + Compact Tactical Radar */}
-      <div className="fixed top-4 left-5 flex flex-col items-start gap-2.5">
-        <div className="flex items-center gap-4 bg-[#11151d]/90 border-l-2 border-amber-500 px-3.5 py-2 shadow-lg">
+      <div className="fixed top-3 left-3 sm:top-4 sm:left-5 flex flex-col items-start gap-1.5 sm:gap-2.5">
+        <div className="flex items-center gap-2.5 sm:gap-4 bg-[#11151d]/90 border-l-2 border-amber-500 px-2.5 sm:px-3.5 py-1.5 sm:py-2 shadow-lg">
           <div>
-            <div className="text-[10px] tracking-[0.2em] text-stone-400 uppercase">Wave</div>
-            <div className="text-2xl font-bold leading-none tabular-nums text-amber-400">
+            <div className="text-[9px] sm:text-[10px] tracking-[0.2em] text-stone-400 uppercase">Wave</div>
+            <div className="text-lg sm:text-2xl font-bold leading-none tabular-nums text-amber-400">
               {String(hud.wave).padStart(2, '0')}
             </div>
           </div>
-          <div className="h-7 w-px bg-stone-700/80" />
+          <div className="h-6 sm:h-7 w-px bg-stone-700/80" />
           <div>
-            <div className="text-[10px] tracking-[0.2em] text-stone-400 uppercase">Hostiles</div>
-            <div className="text-2xl font-bold leading-none tabular-nums text-stone-100">
+            <div className="text-[9px] sm:text-[10px] tracking-[0.2em] text-stone-400 uppercase">Hostiles</div>
+            <div className="text-lg sm:text-2xl font-bold leading-none tabular-nums text-stone-100">
               {hud.enemiesRemaining}
             </div>
           </div>
-          <div className="h-7 w-px bg-stone-700/80" />
-          <div>
+          <div className="hidden sm:block h-6 sm:h-7 w-px bg-stone-700/80" />
+          <div className="hidden sm:block">
             <div className="text-[10px] tracking-[0.2em] text-stone-400 uppercase">Kills</div>
             <div className="text-2xl font-bold leading-none tabular-nums text-stone-200">
               {hud.stats.kills}
@@ -255,7 +275,7 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
 
         {/* Compact Tactical Motion Radar */}
         <div
-          className="relative w-26 h-26 rounded-full bg-[#11151d]/90 border border-stone-700/85 shadow-lg overflow-hidden"
+          className="relative w-20 h-20 sm:w-26 sm:h-26 rounded-full bg-[#11151d]/90 border border-stone-700/85 shadow-lg overflow-hidden"
           aria-label="Tactical radar"
         >
           <svg viewBox="-50 -50 100 100" className="w-full h-full">
@@ -308,21 +328,21 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
 
       {/* Wave Announcement & Wave Cleared Banners */}
       {hud.waveBannerTimer > 0 && (
-        <div className="fixed top-20 left-1/2 -translate-x-1/2 bg-[#11151d]/92 border-y border-amber-500/70 px-7 py-2 text-center">
-          <div className="text-[11px] tracking-[0.35em] text-amber-400 uppercase">
+        <div className="fixed top-16 sm:top-20 left-1/2 -translate-x-1/2 bg-[#11151d]/92 border-y border-amber-500/70 px-4 sm:px-7 py-2 text-center">
+          <div className="text-[10px] sm:text-[11px] tracking-[0.35em] text-amber-400 uppercase">
             {MAP_SPECS[mapId].name} Alert
           </div>
-          <div className="text-xl font-bold tracking-[0.18em] text-stone-100 uppercase">
+          <div className="text-base sm:text-xl font-bold tracking-[0.18em] text-stone-100 uppercase">
             Wave {hud.wave} Deployed
           </div>
         </div>
       )}
       {hud.waveClearBannerTimer > 0 && hud.waveBannerTimer <= 0 && (
-        <div className="fixed top-20 left-1/2 -translate-x-1/2 bg-[#11151d]/92 border-y border-emerald-500/70 px-7 py-2 text-center">
-          <div className="text-[11px] tracking-[0.35em] text-emerald-400 uppercase">
+        <div className="fixed top-16 sm:top-20 left-1/2 -translate-x-1/2 bg-[#11151d]/92 border-y border-emerald-500/70 px-4 sm:px-7 py-2 text-center">
+          <div className="text-[10px] sm:text-[11px] tracking-[0.35em] text-emerald-400 uppercase">
             All Hostiles Neutralized
           </div>
-          <div className="text-xl font-bold tracking-[0.18em] text-stone-100 uppercase">
+          <div className="text-base sm:text-xl font-bold tracking-[0.18em] text-stone-100 uppercase">
             Wave {String(hud.wave).padStart(2, '0')} Cleared
           </div>
         </div>
@@ -372,8 +392,19 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
       )}
 
       {/* Top-Right: Utility Controls + Kill Feed */}
-      <div className="fixed top-4 right-5 flex flex-col items-end gap-2.5">
+      <div className="fixed top-3 right-3 sm:top-4 sm:right-5 flex flex-col items-end gap-2">
         <div className="flex items-center gap-2 pointer-events-auto">
+          {voice && (
+            <VoiceControls
+              enabled={voice.enabled}
+              muted={voice.muted}
+              status={voice.status}
+              level={voice.level}
+              peerCount={voice.peerCount}
+              onToggleMic={voice.onToggleMic}
+              onToggleMute={voice.onToggleMute}
+            />
+          )}
           <button
             type="button"
             tabIndex={-1}
@@ -416,7 +447,7 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
           {hud.killFeed.map((entry) => (
             <div
               key={entry.id}
-              className="px-2.5 py-1 text-xs tracking-wider uppercase bg-[#11151d]/85 border-r-2"
+              className="px-2 py-1 text-[9px] sm:text-xs tracking-wider uppercase bg-[#11151d]/85 border-r-2"
               style={{
                 borderColor: entry.headshot ? '#fbbf24' : '#ef4444',
                 color: entry.headshot ? '#fde68a' : '#e7e5e4',
@@ -429,7 +460,7 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
       </div>
 
       {/* Bottom-Left: Health Bar & Stance */}
-      <div className="fixed bottom-5 left-5 w-64 bg-[#11151d]/85 border-l-2 border-stone-500 px-3.5 py-2.5 shadow-lg">
+      <div className="fixed bottom-3 left-3 sm:bottom-5 sm:left-5 w-44 sm:w-64 bg-[#11151d]/85 border-l-2 border-stone-500 px-2.5 sm:px-3.5 py-2 sm:py-2.5 shadow-lg">
         <div className="flex items-baseline justify-between mb-1.5">
           <div className="flex items-center gap-2">
             <svg viewBox="0 0 24 24" className="w-4 h-4 text-emerald-400" fill="currentColor">
@@ -438,7 +469,7 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
             <span className="text-[10px] tracking-[0.22em] text-stone-400 uppercase">Armor HP</span>
           </div>
           <span
-            className={`text-2xl font-bold leading-none tabular-nums ${
+            className={`text-xl sm:text-2xl font-bold leading-none tabular-nums ${
               lowHealth ? 'text-red-400' : 'text-stone-100'
             }`}
           >
@@ -468,14 +499,17 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
                   ? 'SPRINT'
                   : 'READY'}
           </span>
-          {!hud.pointerLocked && <span className="text-amber-400">CLICK VIEW TO AIM</span>}
+          {!hud.pointerLocked &&
+            !(typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0) && (
+              <span className="text-amber-400">CLICK VIEW TO AIM</span>
+            )}
         </div>
       </div>
 
       {/* Tab scoreboard — live operator standings */}
       {showScores && hud.multiplayer.enabled && (
         <div className="fixed inset-0 flex items-center justify-center bg-black/55 pointer-events-none">
-          <div className="w-[420px] max-w-[92vw] bg-[#0d1219]/95 border border-stone-700 border-t-2 border-t-amber-500 p-4 shadow-2xl">
+          <div className="w-[92vw] max-w-[420px] bg-[#0d1219]/95 border border-stone-700 border-t-2 border-t-amber-500 p-3 sm:p-4 shadow-2xl">
             <div className="flex items-center justify-between mb-3">
               <div>
                 <div className="text-[10px] tracking-[0.3em] text-amber-400 uppercase">Live Scoreboard</div>
@@ -485,9 +519,39 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
               </div>
               <div className="text-right text-[9px] tracking-[0.18em] uppercase text-stone-500">
                 <div>Room {hud.multiplayer.roomCode}</div>
-                <div>{hud.multiplayer.isHost ? 'Host' : 'Operator'}</div>
+                <div>
+                  {hud.multiplayer.isHost ? 'Host' : 'Operator'}
+                  {hud.multiplayer.selfSide && hud.multiplayer.selfSide !== 'attack'
+                    ? ` · ${hud.multiplayer.selfSide.toUpperCase()}`
+                    : hud.multiplayer.selfSide === 'attack'
+                      ? ' · ATTACK ALL'
+                      : ''}
+                </div>
               </div>
             </div>
+            {(() => {
+              const alpha = hud.multiplayer.scores.filter((s) => s.team === 'alpha');
+              const bravo = hud.multiplayer.scores.filter((s) => s.team === 'bravo');
+              if (alpha.length === 0 && bravo.length === 0) return null;
+              const aKills = alpha.reduce((n, s) => n + s.kills, 0);
+              const bKills = bravo.reduce((n, s) => n + s.kills, 0);
+              const myTeam = hud.multiplayer.selfSide === 'alpha' || hud.multiplayer.selfSide === 'bravo'
+                ? hud.multiplayer.selfSide
+                : null;
+              return (
+                <div className="mb-2 flex items-center justify-between border border-stone-800 bg-[#10151d] px-2 py-1">
+                  <span className={`text-[10px] font-bold tracking-[0.16em] uppercase ${myTeam === 'alpha' ? 'text-amber-300' : 'text-stone-400'}`}>
+                    Alpha {aKills}
+                  </span>
+                  <span className="text-[8.5px] tracking-[0.18em] uppercase text-stone-500">
+                    {hud.multiplayer.friendlyFire ? 'FF ON' : 'Squads Protected'}
+                  </span>
+                  <span className={`text-[10px] font-bold tracking-[0.16em] uppercase ${myTeam === 'bravo' ? 'text-sky-300' : 'text-stone-400'}`}>
+                    {bKills} Bravo
+                  </span>
+                </div>
+              );
+            })()}
             <div className="space-y-1">
               <div className="grid grid-cols-[2rem_1fr_3rem_3rem_4rem] gap-1 px-2 pb-1 text-[8.5px] tracking-[0.2em] uppercase text-stone-500 border-b border-stone-800">
                 <span>#</span>
@@ -529,8 +593,8 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
       )}
 
       {/* Bottom-Right: 5-Slot Arsenal, Frag Grenade Ordnance & Diegetic Ammo Readout */}
-      <div className="fixed bottom-5 right-5 flex flex-col items-end gap-2">
-        <div className="flex flex-wrap justify-end gap-1">
+      <div className="fixed bottom-3 right-3 sm:bottom-5 sm:right-5 flex flex-col items-end gap-1.5 sm:gap-2">
+        <div className="flex flex-wrap justify-end gap-1 max-w-[70vw] sm:max-w-none">
           {WEAPON_ORDER.map((wId) => {
             const spec = WEAPON_SPECS[wId];
             const active = hud.activeWeapon === wId;
@@ -576,7 +640,7 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
           </div>
 
           {/* Active Weapon Ammo Readout */}
-          <div className="bg-[#11151d]/85 border-r-2 border-amber-500 px-4 py-2 text-right shadow-lg min-w-[214px]">
+          <div className="bg-[#11151d]/85 border-r-2 border-amber-500 px-3 sm:px-4 py-2 text-right shadow-lg min-w-[160px] sm:min-w-[214px]">
             <div className="text-[10px] tracking-[0.2em] text-amber-400 uppercase">
               {activeSpec.name}
             </div>
@@ -616,6 +680,20 @@ export function GameHUD({ hud, mapId = 'dusk_yard', muted, onToggleMute, onPause
           </div>
         </div>
       </div>
+
+      {/* Squad chat — bottom center */}
+      {chatLines && onSendChat && onChatOpenChange && (
+        <div className="fixed bottom-4 left-1/2 -translate-x-1/2 w-[440px] max-w-[86vw] pointer-events-auto">
+          <ChatBox
+            lines={chatLines}
+            onSend={onSendChat}
+            open={chatOpen}
+            onOpenChange={onChatOpenChange}
+            selfName={chatSelfName}
+            maxLines={30}
+          />
+        </div>
+      )}
     </div>
   );
 }

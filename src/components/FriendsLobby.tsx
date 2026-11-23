@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { ActivePlayersPanel } from './ActivePlayersPanel';
 import {
   DIFFICULTY_TIERS,
   MAP_SPECS,
@@ -7,11 +8,18 @@ import {
 } from '../game/rules';
 import type { FriendEntry, PlayerProfile, BackendKind } from '../game/auth';
 import type { OnlinePlayer, PresenceInvite } from '../game/onlinePresence';
-import type { MatchModeId, DifficultyTierId, MapId, MultiplayerPeer } from '../game/types';
+import type { ChatLine } from './ChatBox';
+import { ChatBox } from './ChatBox';
+import { VoiceControls } from './VoiceControls';
+import type { VoiceStatus } from '../game/voice';
+import type { MatchModeId, DifficultyTierId, MapId, MultiplayerPeer, SquadSide } from '../game/types';
 import {
+  Bot,
   Copy,
   DoorOpen,
   Gamepad2,
+  Shield,
+  ShieldOff,
   Swords,
   UserPlus,
   UserCheck,
@@ -25,6 +33,8 @@ export interface LobbyMatchConfig {
   mapId: MapId;
   tier: DifficultyTierId;
   level: number;
+  /** Allow damage between teammates (squad modes). Default off = protected. */
+  friendlyFire: boolean;
 }
 
 export interface FriendsLobbyProps {
@@ -53,6 +63,27 @@ export interface FriendsLobbyProps {
   onCopyFriendCode: () => void;
   onAcceptInvite: () => void;
   onDeclineInvite: () => void;
+  /** This client's chosen combat role (attack / alpha / bravo). */
+  selfSide: SquadSide;
+  onSetSide: (side: SquadSide) => void;
+  /** Host rule: allow fire between teammates. */
+  onToggleFriendlyFire: () => void;
+  /** Host-only: fill the roster with simulated squad bots for testing. */
+  onSimulateBots: () => void;
+  onClearBots: () => void;
+  /** Lobby-wide text chat (all online players). */
+  chatLines?: ChatLine[];
+  onSendChat?: (text: string) => void;
+  /** Lobby voice chat controls. */
+  voice?: {
+    enabled: boolean;
+    muted: boolean;
+    status: VoiceStatus;
+    level: number;
+    peerCount: number;
+    onToggleMic: () => void;
+    onToggleMute: () => void;
+  };
 }
 
 const ARENA_ORDER: MapId[] = [
@@ -65,20 +96,6 @@ const ARENA_ORDER: MapId[] = [
 ];
 
 const MODE_ORDER: MatchModeId[] = ['survival', 'tdm', 'ffa', 'zone_control'];
-
-function StatusChip({ status }: { status: OnlinePlayer['status'] }) {
-  const map = {
-    online: { label: 'ONLINE', cls: 'text-emerald-400 border-emerald-800' },
-    lobby: { label: 'IN LOBBY', cls: 'text-sky-400 border-sky-800' },
-    match: { label: 'IN MATCH', cls: 'text-amber-400 border-amber-800' },
-  } as const;
-  const s = map[status];
-  return (
-    <span className={`px-1.5 py-px border text-[8.5px] tracking-[0.16em] uppercase ${s.cls}`}>
-      {s.label}
-    </span>
-  );
-}
 
 export function FriendsLobby(props: FriendsLobbyProps) {
   const {
@@ -107,17 +124,53 @@ export function FriendsLobby(props: FriendsLobbyProps) {
     onCopyFriendCode,
     onAcceptInvite,
     onDeclineInvite,
+    selfSide,
+    onSetSide,
+    onToggleFriendlyFire,
+    onSimulateBots,
+    onClearBots,
+    chatLines,
+    onSendChat,
+    voice,
   } = props;
 
   const [friendInput, setFriendInput] = useState('');
   const [joinInput, setJoinInput] = useState('');
   const [copied, setCopied] = useState(false);
   const [activeTab, setActiveTab] = useState<'friends' | 'players'>('players');
+  const [chatOpen, setChatOpen] = useState(true);
 
   const remotePlayers = onlinePlayers.filter((p) => !p.isSelf);
   const selfReady = members[0]?.ready ?? false;
   const allReady = members.length > 0 && members.every((m) => m.ready);
   const activeMode = MATCH_MODE_SPECS[matchConfig.mode];
+  const botCount = members.filter((m) => m.bot).length;
+
+  const SIDE_META: Record<SquadSide, { label: string; hint: string; cls: string; dot: string }> = {
+    attack: {
+      label: 'ATTACK ALL',
+      hint: 'Solo striker — everyone is a rival',
+      cls: 'border-red-800/70 text-red-300',
+      dot: 'bg-red-400',
+    },
+    alpha: {
+      label: 'ALPHA SQUAD',
+      hint: 'Team up — amber squad vs rival teams',
+      cls: 'border-amber-600/70 text-amber-300',
+      dot: 'bg-amber-400',
+    },
+    bravo: {
+      label: 'BRAVO SQUAD',
+      hint: 'Team up — sky squad vs rival teams',
+      cls: 'border-sky-700/70 text-sky-300',
+      dot: 'bg-sky-400',
+    },
+  };
+  const sideChip = (side?: SquadSide, bot?: boolean) => {
+    if (bot) return { label: 'BOT', cls: 'border-stone-600 text-stone-400', dot: 'bg-stone-500' };
+    if (!side || side === 'attack') return SIDE_META.attack;
+    return SIDE_META[side];
+  };
 
   const handleCopyCode = () => {
     onCopyFriendCode();
@@ -259,59 +312,15 @@ export function FriendsLobby(props: FriendsLobbyProps) {
             </div>
 
             {activeTab === 'players' ? (
-              <div className="max-h-44 overflow-y-auto divide-y divide-stone-800/60">
-                {remotePlayers.length === 0 && (
-                  <div className="px-3 py-3 text-[10px] tracking-[0.14em] uppercase text-stone-500 text-center">
-                    {backendKind === 'none'
-                      ? 'No other tabs detected — open a second tab to test multiplayer'
-                      : 'No operators online right now'}
-                  </div>
-                )}
-                {remotePlayers.map((p) => (
-                  <div key={p.id} className="flex items-center justify-between gap-2 px-2.5 py-1.5">
-                    <div className="min-w-0 flex items-center gap-2">
-                      <span
-                        className={`w-1.5 h-1.5 rounded-full shrink-0 ${
-                          p.status === 'match' ? 'bg-amber-400' : p.status === 'lobby' ? 'bg-sky-400' : 'bg-emerald-400'
-                        } tac-blink`}
-                      />
-                      <div className="min-w-0">
-                        <div className="text-[11px] font-bold tracking-[0.12em] uppercase text-stone-200 truncate">
-                          {p.callsign}
-                        </div>
-                        <div className="text-[9px] tracking-[0.14em] uppercase text-stone-500">
-                          {p.friendCode ? `${p.friendCode} · ` : ''}
-                          {p.status === 'match' ? `In Match${p.mode ? ` · ${p.mode.toUpperCase()}` : ''}` : p.status === 'lobby' ? 'In Lobby' : 'Online'}
-                          {' · '}{p.ping}ms
-                        </div>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-1 shrink-0">
-                      <StatusChip status={p.status} />
-                      {p.roomCode && (
-                        <button
-                          type="button"
-                          onClick={() => onJoinPlayerRoom(p)}
-                          className="px-1.5 py-0.5 border border-stone-700 text-[9px] tracking-[0.14em] uppercase text-stone-300 hover:border-amber-500 hover:text-amber-300 cursor-pointer"
-                        >
-                          Join
-                        </button>
-                      )}
-                      {inRoom && (
-                        <button
-                          type="button"
-                          onClick={() => onInvitePlayer(p)}
-                          className="px-1.5 py-0.5 border border-stone-700 text-[9px] tracking-[0.14em] uppercase text-stone-300 hover:border-sky-500 hover:text-sky-300 cursor-pointer"
-                        >
-                          Invite
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <ActivePlayersPanel
+                players={onlinePlayers}
+                canInvite={inRoom}
+                backendKind={backendKind}
+                onInvite={onInvitePlayer}
+                onJoinRoom={onJoinPlayerRoom}
+              />
             ) : (
-              <div className="max-h-44 overflow-y-auto">
+              <div className="max-h-44 overflow-y-auto no-scrollbar">
                 <div className="flex gap-1.5 p-2 border-b border-stone-800/60">
                   <input
                     type="text"
@@ -411,8 +420,19 @@ export function FriendsLobby(props: FriendsLobbyProps) {
                     {idx === 0 ? ' (you)' : ''}
                   </span>
                   {m.isHost && <span className="text-amber-400 text-[10px]">★</span>}
+                  {(() => {
+                    const chip = sideChip(m.side, m.bot);
+                    return (
+                      <span
+                        className={`px-1 py-px border text-[8px] font-bold tracking-[0.12em] uppercase ${chip.cls}`}
+                      >
+                        {chip.label}
+                      </span>
+                    );
+                  })()}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
+                  {m.bot && <Bot className="w-3 h-3 text-stone-500" />}
                   {m.skin && m.skin !== 'standard' && (
                     <span
                       className="w-2.5 h-2.5 border border-stone-600"
@@ -430,13 +450,48 @@ export function FriendsLobby(props: FriendsLobbyProps) {
             ))}
           </div>
 
+          {/* Combat role: attack all vs team up — everyone picks before START */}
+          <div className="border border-stone-800/80 bg-[#0d1219]/60 p-2.5 space-y-1.5">
+            <div className="text-[9.5px] tracking-[0.2em] uppercase text-stone-400">
+              Combat Role — pick before deploy
+            </div>
+            <div className="grid grid-cols-3 gap-1">
+              {(['attack', 'alpha', 'bravo'] as SquadSide[]).map((s) => {
+                const meta = SIDE_META[s];
+                const sel = selfSide === s;
+                return (
+                  <button
+                    key={s}
+                    type="button"
+                    data-side={s}
+                    onClick={() => onSetSide(s)}
+                    title={meta.hint}
+                    className={`px-1 py-1.5 border text-center cursor-pointer transition-colors ${
+                      sel
+                        ? `${meta.cls} bg-[#1a2230] font-bold`
+                        : 'bg-[#11161f] border-stone-800 text-stone-500 hover:border-stone-600 hover:text-stone-300'
+                    }`}
+                  >
+                    <div className="flex items-center justify-center gap-1 text-[9.5px] tracking-[0.1em] uppercase">
+                      <span className={`w-1.5 h-1.5 rounded-full ${meta.dot}`} />
+                      {meta.label}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+            <div className="text-[8.5px] tracking-[0.1em] uppercase text-stone-600">
+              {SIDE_META[selfSide].hint}
+            </div>
+          </div>
+
           {/* Host controls: mode / arena / tier */}
           {isHost ? (
             <div className="space-y-2 border border-stone-800/80 bg-[#0d1219]/60 p-2.5">
               <div className="text-[9.5px] tracking-[0.2em] uppercase text-stone-400 flex items-center gap-1.5">
                 <Swords className="w-3 h-3 text-amber-500" /> Match Rules — Host Control
               </div>
-              <div className="grid grid-cols-4 gap-1">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1">
                 {MODE_ORDER.map((m) => {
                   const spec = MATCH_MODE_SPECS[m];
                   const sel = matchConfig.mode === m;
@@ -462,7 +517,42 @@ export function FriendsLobby(props: FriendsLobbyProps) {
               </div>
               <div className="text-[9px] text-stone-500 leading-snug">{activeMode.description}</div>
 
-              <div className="grid grid-cols-3 gap-1">
+              {/* Rules extras: friendly fire + simulated squad fill */}
+              <div className="flex items-center justify-between gap-2 border border-stone-800/70 bg-[#10151d] px-2 py-1.5">
+                <div className="flex items-center gap-1.5 text-[9.5px] tracking-[0.14em] uppercase text-stone-300">
+                  {matchConfig.friendlyFire ? (
+                    <ShieldOff className="w-3.5 h-3.5 text-red-400" />
+                  ) : (
+                    <Shield className="w-3.5 h-3.5 text-emerald-400" />
+                  )}
+                  Friendly Fire {matchConfig.friendlyFire ? 'ON' : 'OFF — squads protected'}
+                </div>
+                <button
+                  type="button"
+                  data-lobby="ff-toggle"
+                  onClick={onToggleFriendlyFire}
+                  className={`px-2 py-0.5 border text-[9px] font-bold tracking-[0.14em] uppercase cursor-pointer ${
+                    matchConfig.friendlyFire
+                      ? 'border-red-800 text-red-300 hover:bg-red-950/40'
+                      : 'border-emerald-800 text-emerald-300 hover:bg-emerald-950/40'
+                  }`}
+                >
+                  {matchConfig.friendlyFire ? 'Disable' : 'Enable'}
+                </button>
+              </div>
+              <div className="flex gap-1.5">
+                <button
+                  type="button"
+                  data-lobby="bots"
+                  onClick={botCount > 0 ? onClearBots : onSimulateBots}
+                  className="flex-1 flex items-center justify-center gap-1.5 py-1.5 border border-stone-700 bg-[#141923] hover:bg-[#1c2331] text-stone-300 text-[9.5px] font-bold tracking-[0.14em] uppercase cursor-pointer"
+                >
+                  <Bot className="w-3.5 h-3.5 text-stone-400" />
+                  {botCount > 0 ? `Clear Bots (${botCount})` : 'Simulate Squad (4v4 fill)'}
+                </button>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-3 gap-1">
                 {ARENA_ORDER.map((id) => {
                   const m = MAP_SPECS[id];
                   const sel = matchConfig.mapId === id;
@@ -513,7 +603,8 @@ export function FriendsLobby(props: FriendsLobbyProps) {
             <div className="border border-stone-800/80 bg-[#0d1219]/60 px-2.5 py-2 text-[10px] tracking-[0.12em] uppercase text-stone-400">
               Host selected: <span className="text-amber-300 font-bold">{activeMode.name}</span> ·{' '}
               {MAP_SPECS[matchConfig.mapId].name} ·{' '}
-              {DIFFICULTY_TIERS.find((t) => t.id === matchConfig.tier)?.name ?? 'EASY'}
+              {DIFFICULTY_TIERS.find((t) => t.id === matchConfig.tier)?.name ?? 'EASY'} ·{' '}
+              {matchConfig.friendlyFire ? 'FF ON' : 'Squads Protected'}
             </div>
           )}
 
@@ -552,6 +643,39 @@ export function FriendsLobby(props: FriendsLobbyProps) {
             </button>
           </div>
         </>
+      )}
+
+      {/* Lobby comms: voice channel + global online chat */}
+      {(voice || (chatLines && onSendChat)) && (
+        <div className="border-t border-stone-800/80 pt-2.5 space-y-2">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[9.5px] font-semibold tracking-[0.2em] uppercase text-stone-400">
+              Lobby Comms
+            </div>
+            {voice && (
+              <VoiceControls
+                enabled={voice.enabled}
+                muted={voice.muted}
+                status={voice.status}
+                level={voice.level}
+                peerCount={voice.peerCount}
+                onToggleMic={voice.onToggleMic}
+                onToggleMute={voice.onToggleMute}
+              />
+            )}
+          </div>
+          {chatLines && onSendChat && (
+            <ChatBox
+              lines={chatLines}
+              onSend={onSendChat}
+              open={chatOpen}
+              onOpenChange={setChatOpen}
+              selfName={profile.callsign}
+              placeholder="Message all online operators…"
+              maxLines={40}
+            />
+          )}
+        </div>
       )}
     </div>
   );

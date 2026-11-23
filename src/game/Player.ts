@@ -16,6 +16,18 @@ const _right = new THREE.Vector3();
 const _moveDir = new THREE.Vector3();
 const _euler = new THREE.Euler(0, 0, 0, 'YXZ');
 
+export type TouchAction =
+  | 'jump'
+  | 'reload'
+  | 'melee'
+  | 'grenade'
+  | 'interact'
+  | 'crouch'
+  | 'slot1'
+  | 'slot2'
+  | 'slot3'
+  | 'pause';
+
 export interface PlayerSpawnPoint {
   x: number;
   y: number;
@@ -70,6 +82,13 @@ export class Player {
   private lastPointerX = 0;
   private lastPointerY = 0;
   private lockTimestamp = 0;
+
+  // Virtual (touch) input state — analog move + look deltas + action flags.
+  private touchMoveX = 0;
+  private touchMoveY = 0;
+  private touchFireHeld = false;
+  private touchAdsHeld = false;
+  private touchBrakeHeld = false;
 
   private readonly onKeyDownBound: (e: KeyboardEvent) => void;
   private readonly onKeyUpBound: (e: KeyboardEvent) => void;
@@ -171,6 +190,11 @@ export class Player {
     this.switchWeaponRequest = null;
     this.wheelDelta = 0;
     this.isDraggingFallback = false;
+    this.touchMoveX = 0;
+    this.touchMoveY = 0;
+    this.touchFireHeld = false;
+    this.touchAdsHeld = false;
+    this.touchBrakeHeld = false;
   }
 
   lockPointer(): void {
@@ -196,6 +220,9 @@ export class Player {
   private handleKeyDown(e: KeyboardEvent): void {
     const state = document.body.dataset.state;
     if (state !== 'playing') return;
+    // Never treat typing in a text field (chat, menus) as game input.
+    const el = document.activeElement;
+    if (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement) return;
 
     this.keys.add(e.code);
 
@@ -227,31 +254,7 @@ export class Player {
     } else if (e.code === 'Digit8') {
       this.switchWeaponRequest = 8;
     } else if (e.code === 'KeyC') {
-      const horizSpeed = Math.hypot(this.velocity.x, this.velocity.z);
-      if (
-        !this.isSliding &&
-        this.slideCooldown <= 0 &&
-        this.isGrounded &&
-        (this.isSprinting || horizSpeed > 7.2)
-      ) {
-        this.isSliding = true;
-        this.slideTimer = 0.48;
-        this.slideCooldown = 0.88;
-        this.isCrouching = false;
-        if (horizSpeed > 0.5) {
-          this.slideDirX = this.velocity.x / horizSpeed;
-          this.slideDirZ = this.velocity.z / horizSpeed;
-        } else {
-          _forward.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
-          _forward.y = 0;
-          _forward.normalize();
-          this.slideDirX = _forward.x;
-          this.slideDirZ = _forward.z;
-        }
-        this.sound.playSlide();
-      } else if (!this.isSliding) {
-        this.isCrouching = !this.isCrouching;
-      }
+      this.toggleCrouchOrSlide();
     } else if (e.code === 'KeyP' || e.code === 'Escape') {
       this.onEscapePause();
     }
@@ -328,18 +331,119 @@ export class Player {
     }
   }
 
+  // ---------------- Touch / virtual controls API ----------------
+
+  /** Analog move vector: x = strafe (-1 left .. 1 right), y = forward (-1 back .. 1 fwd). */
+  setTouchMove(x: number, y: number): void {
+    this.touchMoveX = THREE.MathUtils.clamp(x, -1, 1);
+    this.touchMoveY = THREE.MathUtils.clamp(y, -1, 1);
+  }
+
+  setTouchFire(held: boolean): void {
+    if (held && !this.touchFireHeld) {
+      this.mouseFireJustPressed = true;
+    }
+    this.touchFireHeld = held;
+  }
+
+  setTouchAds(held: boolean): void {
+    this.touchAdsHeld = held;
+  }
+
+  setTouchBrake(held: boolean): void {
+    this.touchBrakeHeld = held;
+  }
+
+  /** Queue a one-shot touch action (jump, reload, melee, grenade, interact, crouch, slots, pause). */
+  queueTouchAction(action: TouchAction): void {
+    switch (action) {
+      case 'jump':
+        this.jumpBufferTimer = 0.13;
+        break;
+      case 'reload':
+        this.reloadJustPressed = true;
+        break;
+      case 'melee':
+        this.meleeJustPressed = true;
+        break;
+      case 'grenade':
+        this.grenadeJustPressed = true;
+        break;
+      case 'interact':
+        this.interactJustPressed = true;
+        break;
+      case 'crouch':
+        this.toggleCrouchOrSlide();
+        break;
+      case 'slot1':
+        this.switchWeaponRequest = 1;
+        break;
+      case 'slot2':
+        this.switchWeaponRequest = 2;
+        break;
+      case 'slot3':
+        this.switchWeaponRequest = 3;
+        break;
+      case 'pause':
+        this.onEscapePause();
+        break;
+    }
+  }
+
+  /** Apply a look delta (pixels) — same response curve as mouse-drag fallback. */
+  applyTouchLook(dx: number, dy: number): void {
+    const sensScale = 0.0021 * this.sensitivity * (this.isAds ? 0.58 : 1.0);
+    _euler.setFromQuaternion(this.camera.quaternion, 'YXZ');
+    _euler.y -= dx * sensScale;
+    _euler.x -= dy * sensScale;
+    _euler.x = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, _euler.x));
+    this.camera.quaternion.setFromEuler(_euler);
+    this.lookDeltaX += dx * sensScale;
+    this.lookDeltaY += dy * sensScale;
+  }
+
+  private toggleCrouchOrSlide(): void {
+    const horizSpeed = Math.hypot(this.velocity.x, this.velocity.z);
+    if (
+      !this.isSliding &&
+      this.slideCooldown <= 0 &&
+      this.isGrounded &&
+      (this.isSprinting || horizSpeed > 7.2)
+    ) {
+      this.isSliding = true;
+      this.slideTimer = 0.48;
+      this.slideCooldown = 0.88;
+      this.isCrouching = false;
+      if (horizSpeed > 0.5) {
+        this.slideDirX = this.velocity.x / horizSpeed;
+        this.slideDirZ = this.velocity.z / horizSpeed;
+      } else {
+        _forward.set(0, 0, -1).applyQuaternion(this.camera.quaternion);
+        _forward.y = 0;
+        _forward.normalize();
+        this.slideDirX = _forward.x;
+        this.slideDirZ = _forward.z;
+      }
+      this.sound.playSlide();
+    } else if (!this.isSliding) {
+      this.isCrouching = !this.isCrouching;
+    }
+  }
+
   /** Throttle (-1..1), steer (-1..1), handbrake for vehicle control. */
   getVehicleInput(): { throttle: number; steer: number; handbrake: boolean } {
     const throttle =
       (this.keys.has('KeyW') || this.keys.has('ArrowUp') ? 1 : 0) -
-      (this.keys.has('KeyS') || this.keys.has('ArrowDown') ? 1 : 0);
+      (this.keys.has('KeyS') || this.keys.has('ArrowDown') ? 1 : 0) +
+      this.touchMoveY;
     const steer =
       (this.keys.has('KeyA') || this.keys.has('ArrowLeft') ? 1 : 0) -
-      (this.keys.has('KeyD') || this.keys.has('ArrowRight') ? 1 : 0);
+      (this.keys.has('KeyD') || this.keys.has('ArrowRight') ? 1 : 0) -
+      this.touchMoveX;
     return {
-      throttle,
-      steer,
-      handbrake: this.keys.has('Space'),
+      throttle: THREE.MathUtils.clamp(throttle, -1, 1),
+      steer: THREE.MathUtils.clamp(steer, -1, 1),
+      handbrake: this.keys.has('Space') || this.touchBrakeHeld,
     };
   }
 
@@ -360,9 +464,9 @@ export class Player {
     wheelDelta: -1 | 0 | 1;
   } {
     const out = {
-      fireHeld: this.mouseFireHeld,
+      fireHeld: this.mouseFireHeld || this.touchFireHeld,
       fireJustPressed: this.mouseFireJustPressed,
-      adsHeld: this.mouseAdsHeld,
+      adsHeld: this.mouseAdsHeld || this.touchAdsHeld,
       reloadJustPressed: this.reloadJustPressed,
       meleeJustPressed: this.meleeJustPressed,
       grenadeJustPressed: this.grenadeJustPressed,
@@ -431,10 +535,12 @@ export class Player {
 
     const forwardInput =
       (this.keys.has('KeyW') || this.keys.has('ArrowUp') ? 1 : 0) -
-      (this.keys.has('KeyS') || this.keys.has('ArrowDown') ? 1 : 0);
+      (this.keys.has('KeyS') || this.keys.has('ArrowDown') ? 1 : 0) +
+      this.touchMoveY;
     const strafeInput =
       (this.keys.has('KeyD') || this.keys.has('ArrowRight') ? 1 : 0) -
-      (this.keys.has('KeyA') || this.keys.has('ArrowLeft') ? 1 : 0);
+      (this.keys.has('KeyA') || this.keys.has('ArrowLeft') ? 1 : 0) +
+      this.touchMoveX;
 
     const sprintHeld = this.keys.has('ShiftLeft') || this.keys.has('ShiftRight');
     this.slideCooldown = Math.max(0, this.slideCooldown - dt);

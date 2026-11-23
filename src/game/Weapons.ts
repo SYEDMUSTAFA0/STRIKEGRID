@@ -1430,8 +1430,12 @@ export class Weapons {
       0.005,
     );
     const fingerGeo = new THREE.CapsuleGeometry(0.0068, 0.026, 5, 8);
+    const fingerTipGeo = new THREE.CapsuleGeometry(0.0052, 0.02, 4, 6);
     const thumbGeo = new THREE.CapsuleGeometry(0.0085, 0.026, 5, 8);
     const watchBezelGeo = new THREE.CylinderGeometry(0.016, 0.016, 0.009, 12);
+    const cuffGeo = new THREE.TorusGeometry(0.038, 0.009, 8, 16);
+    const knuckleGeo = new THREE.BoxGeometry(0.054, 0.014, 0.026);
+    const elbowPadGeo = new THREE.SphereGeometry(0.052, 12, 10);
     this.disposables.push(
       sleeveMat,
       gloveMat,
@@ -1441,8 +1445,12 @@ export class Weapons {
       wristGeo,
       palmGeo,
       fingerGeo,
+      fingerTipGeo,
       thumbGeo,
       watchBezelGeo,
+      cuffGeo,
+      knuckleGeo,
+      elbowPadGeo,
     );
 
     const buildSegmentedArm = (
@@ -1471,6 +1479,21 @@ export class Weapons {
       wrist.quaternion.copy(forearm.quaternion);
       arm.add(wrist);
 
+      // Rolled sleeve cuff at the wrist
+      const cuff = new THREE.Mesh(cuffGeo, sleeveMat);
+      cuff.position.copy(wristPos);
+      cuff.quaternion.copy(forearm.quaternion);
+      cuff.rotateX(Math.PI / 2);
+      arm.add(cuff);
+
+      // Elbow pad near the shoulder end of the forearm
+      const elbowPos = s.clone().lerp(h, 0.14);
+      const elbowPad = new THREE.Mesh(elbowPadGeo, cuffMat);
+      elbowPad.position.copy(elbowPos);
+      elbowPad.quaternion.copy(forearm.quaternion);
+      elbowPad.scale.set(1.15, 0.75, 0.95);
+      arm.add(elbowPad);
+
       if (withWatch) {
         const bezel = new THREE.Mesh(watchBezelGeo, knuckleMat);
         bezel.position.copy(wristPos).add(new THREE.Vector3(0, 0.029, 0));
@@ -1484,12 +1507,21 @@ export class Weapons {
       const palm = new THREE.Mesh(palmGeo, gloveMat);
       hand.add(palm);
 
-      // 4 Articulated Curled Fingers around grip / foregrip
+      // Knuckle reinforcement ridge across the glove back
+      const knuckles = new THREE.Mesh(knuckleGeo, knuckleMat);
+      knuckles.position.set(0, 0.027, -0.011);
+      hand.add(knuckles);
+
+      // 4 Articulated two-segment curled fingers around grip / foregrip
       for (let f = 0; f < 4; f++) {
         const finger = new THREE.Mesh(fingerGeo, knuckleMat);
         finger.position.set(thumbSide * -0.021, 0.015 - f * 0.011, -0.014);
         finger.rotation.set(0.25, 0, thumbSide * 0.85);
         hand.add(finger);
+        const tip = new THREE.Mesh(fingerTipGeo, gloveMat);
+        tip.position.set(thumbSide * -0.0245, 0.001 - f * 0.011, -0.023);
+        tip.rotation.set(0.55, 0, thumbSide * 1.18);
+        hand.add(tip);
       }
 
       const thumb = new THREE.Mesh(thumbGeo, gloveMat);
